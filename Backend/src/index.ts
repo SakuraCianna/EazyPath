@@ -8,7 +8,8 @@ import { checkDatabase, queryClient } from './db/index.js';
 import { fail, ok } from './lib/api-response.js';
 import { checkRedis } from './queue/connection.js';
 import { registerMaintenanceSchedules, taskQueue } from './queue/task-queue.js';
-import { adminAuthRouter, adminRouter } from './routes/admin.js';
+import { adminRouter } from './routes/admin.js';
+import { adminAuthRouter } from './routes/admin-auth.js';
 import { observationsRouter, reviewTasksRouter, locationProofsRouter } from './routes/community.js';
 import { installationsRouter, sessionsRouter } from './routes/installations.js';
 import { linksRouter } from './routes/links.js';
@@ -19,6 +20,7 @@ import { profileRouter } from './routes/profile.js';
 import { tasksRouter } from './routes/tasks.js';
 import { verificationsRouter } from './routes/verifications.js';
 import { prepareMediaDirectories } from './services/media-storage.js';
+import { closeAdminLoginGuard } from './services/admin-login-guard.js';
 import type { AppBindings } from './types.js';
 
 const env = getEnv();
@@ -85,7 +87,7 @@ async function main(): Promise<void> {
 
 async function shutdown(signal: string): Promise<void> {
   console.info(JSON.stringify({ level: 'info', event: 'server.shutdown', signal }));
-  await Promise.all([taskQueue.close(), queryClient.end()]);
+  await Promise.all([taskQueue.close(), closeAdminLoginGuard(), queryClient.end()]);
   process.exit(0);
 }
 

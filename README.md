@@ -12,7 +12,7 @@ EazyPath 是面向轮椅和行动不便用户的真实数据无障碍出行链 M
 | 文字 Agent 与 SSE | 已接 Qwen、BullMQ、真实高德 POI、PostgreSQL 事件恢复 | 完整任务补充/取消端侧交互、状态机压力测试 |
 | AI 图片验真 | 已接 VLM、临时 tmpfs、成功/最终失败删除 | AI 验真图片的独立端侧脱敏编辑复用 |
 | 社区证据 | Android 已支持真实地点搜索、数据库字段定义动态表单、端侧人脸/敏感文字检测、手工补框、实际上传副本预览、脱敏分片续传、退出清理敏感草稿和待审核观测；后端已有字段类型校验、位置证明、撤回、复核与共识 | Android 瞬时位置证明、管理端受控证据图片审核闭环 |
-| 管理端 | 已有登录、RBAC 门禁、真实列表、基础新增/审核/平台配置 | 冲突结案、会话撤销、媒体操作等完整运营动作和 UI 自动化测试 |
+| 管理端 | 后端已有安全登录、30 分钟空闲/8 小时绝对会话、CSRF、改密、全会话撤销、RBAC 变更审计和真实列表 | 证据审核事务闭环、冲突结案、受权媒体操作和 UI 自动化测试 |
 | 语音 | Android 系统语音识别与 TTS 可用 | Qwen 实时 ASR/TTS WebSocket 和 PCM/Opus 流式采集 |
 | 部署 | Node 24、PG 18/PostGIS、Redis 8/BullMQ、Nginx Compose 已配置 | 当前 Compose 仅供受控测试；生产 TLS/WSS 证书与外部入口尚未配置 |
 
@@ -58,6 +58,17 @@ Android Key 不进入后端 `.env`。同步脚本发现旧 `.env` 中存在非�
 AMAP_ANDROID_KEY=替换为绑定包名和签名的AndroidKey
 EAZYPATH_API_BASE_URL=https://api.example.com/
 ```
+
+## 管理员认证与 RBAC
+
+- `POST /api/v1/admin/auth/login`：创建随机不透明会话和 CSRF 令牌，失败响应不区分用户名是否存在；Redis 在 Argon2id 前执行来源/全局限流和并发租约，Nginx 提供第二层来源限流
+- `GET /api/v1/admin/auth/me`：读取当前管理员、角色和权限
+- `POST /api/v1/admin/auth/csrf`：浏览器刷新后轮换并恢复 CSRF 令牌
+- `POST /api/v1/admin/auth/change-password`：验证当前密码，修改后撤销全部会话
+- `POST /api/v1/admin/auth/logout` 与 `/logout-all`：撤销当前或全部会话
+- `/api/v1/admin/admin-users/*` 与 `/roles/*`：创建管理员、停用/换角色、撤销会话和管理权限字典
+
+除登录、身份读取和 CSRF 恢复外，管理端写请求必须同时携带 HttpOnly Session Cookie 和 `X-CSRF-Token`。管理员停用、角色变化或角色权限变化会立即撤销受影响会话；系统始终保留至少一个活跃超级管理员。角色与管理员写操作会在事务内重新读取操作者角色，普通管理员只能授予自身权限子集，`super_admin` 和 `*` 只能由超级管理员授予。连续失败仍记录账户锁定状态，但正确密码可立即恢复，避免匿名攻击者利用默认用户名持续阻断合法管理员。正式管理员密码至少 12 位，拒绝常见密码、包含用户名以及缺少字母或数字的密码。
 
 ## 不启动服务的检查
 
@@ -113,7 +124,7 @@ API 与 Worker 暂时同容器是单机 MVP 的隐私约束：两者需要共享
 
 - `src/db/schema.ts` 是表结构代码事实源
 - `drizzle.config.ts` 配置 schema、PostgreSQL dialect 和迁移目录
-- `npm run db:generate` 在后续结构变更时生成新的增量迁移
+- 当前开发阶段修改结构时直接同步 `src/db/schema.ts` 和 `0000_baseline.sql`，不得生成第二个 SQL；进入正式发布后再改用增量迁移
 - `npm run db:check` 检查 snapshot、journal 与 SQL 历史一致性
 - `npm run db:migrate` 使用 `drizzle-orm/postgres-js/migrator` 按 journal 执行未应用迁移，并记录到 `drizzle.__drizzle_migrations`
 

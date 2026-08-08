@@ -15,6 +15,7 @@ CREATE TABLE "admin_sessions" (
 	"token_hash" varchar(128) NOT NULL,
 	"csrf_hash" varchar(128) NOT NULL,
 	"expires_at" timestamp with time zone NOT NULL,
+	"last_seen_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"revoked_at" timestamp with time zone,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL
 );
@@ -387,6 +388,7 @@ ALTER TABLE "verification_records_v2" ADD CONSTRAINT "verification_records_v2_in
 ALTER TABLE "verification_records_v2" ADD CONSTRAINT "verification_records_v2_place_id_places_id_fk" FOREIGN KEY ("place_id") REFERENCES "public"."places"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "verification_records_v2" ADD CONSTRAINT "verification_records_v2_place_unit_id_place_units_id_fk" FOREIGN KEY ("place_unit_id") REFERENCES "public"."place_units"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
 CREATE UNIQUE INDEX "uq_admin_sessions_token" ON "admin_sessions" USING btree ("token_hash");--> statement-breakpoint
+CREATE INDEX "idx_admin_sessions_user_expiry" ON "admin_sessions" USING btree ("admin_user_id","expires_at");--> statement-breakpoint
 CREATE UNIQUE INDEX "uq_admin_users_username" ON "admin_users" USING btree ("username");--> statement-breakpoint
 CREATE UNIQUE INDEX "uq_agent_subtasks_task_key" ON "agent_subtasks" USING btree ("task_id","external_key");--> statement-breakpoint
 CREATE INDEX "idx_agent_tasks_installation_status" ON "agent_tasks" USING btree ("installation_id","status","created_at");--> statement-breakpoint
