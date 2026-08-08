@@ -1,7 +1,17 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
 }
+
+val localProperties = Properties().apply {
+    val file = rootProject.file("local.properties")
+    if (file.exists()) file.inputStream().use(::load)
+}
+
+fun localOrGradleProperty(name: String, fallback: String) = providers.gradleProperty(name)
+    .orElse(localProperties.getProperty(name) ?: fallback)
 
 android {
     namespace = "com.eazypath"
@@ -14,13 +24,9 @@ android {
         versionCode = 1
         versionName = "1.0"
 
-        val apiBaseUrl = providers.gradleProperty("EAZYPATH_API_BASE_URL")
-            .orElse("https://api.example.com/")
-            .get()
+        val apiBaseUrl = localOrGradleProperty("EAZYPATH_API_BASE_URL", "https://api.example.com/").get()
         buildConfigField("String", "API_BASE_URL", "\"$apiBaseUrl\"")
-        manifestPlaceholders["AMAP_ANDROID_KEY"] = providers.gradleProperty("AMAP_ANDROID_KEY")
-            .orElse("not-configured")
-            .get()
+        manifestPlaceholders["AMAP_ANDROID_KEY"] = localOrGradleProperty("AMAP_ANDROID_KEY", "not-configured").get()
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a")

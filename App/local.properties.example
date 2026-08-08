@@ -1,0 +1,6 @@
+# 本机 Android 配置示例, 请把所需字段追加到 Android Studio 生成的 local.properties
+# 高德 Android SDK Key, 应绑定正式包名和签名
+AMAP_ANDROID_KEY=replace_with_amap_android_key
+
+# Android 客户端访问的后端公开地址
+EAZYPATH_API_BASE_URL=https://api.example.com/
