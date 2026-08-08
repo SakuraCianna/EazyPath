@@ -5,16 +5,35 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
-    "start": "node dist/index.js"
+    "start": "node dist/index.js",
+    "start:all": "node dist/serve-all.js",
+    "worker": "node dist/worker.js",
+    "worker:dev": "tsx watch src/worker.ts",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "db:generate": "drizzle-kit generate",
+    "db:check": "drizzle-kit check",
+    "db:migrate": "node dist/scripts/migrate.js",
+    "db:push": "drizzle-kit push",
+    "admin:bootstrap": "node dist/scripts/bootstrap-admin.js"
   },
   "dependencies": {
-    "@hono/node-server": "^1.13.7",
-    "dotenv": "^16.4.7",
-    "hono": "^4.6.14"
+    "@hono/node-server": "^2.1.0",
+    "argon2": "^0.45.1",
+    "bullmq": "^6.0.9",
+    "dotenv": "^17.2.3",
+    "drizzle-orm": "^0.45.2",
+    "hono": "^4.13.1",
+    "ioredis": "^6.0.0",
+    "jose": "^6.2.8",
+    "postgres": "^3.4.9",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@types/node": "^22.10.2",
-    "tsx": "^4.19.2",
-    "typescript": "^5.7.2"
+    "@types/node": "^24.10.1",
+    "drizzle-kit": "^0.31.10",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.2",
+    "vitest": "^4.1.10"
   }
 }
