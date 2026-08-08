@@ -22,7 +22,7 @@ export function ok<T>(c: Context, data: T, message = 'success', status = 200) {
 
 export function fail(
   c: Context,
-  status: 400 | 401 | 403 | 404 | 409 | 413 | 422 | 429 | 500 | 502 | 503,
+  status: 400 | 401 | 403 | 404 | 409 | 410 | 413 | 422 | 429 | 500 | 502 | 503,
   code: string,
   message: string,
   error: ApiErrorDetail = { retryable: false },

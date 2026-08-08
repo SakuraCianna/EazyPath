@@ -121,8 +121,8 @@ CREATE TABLE "evidence_media" (
 	"byte_size" integer NOT NULL,
 	"width" integer,
 	"height" integer,
-	"fingerprint_hmac" varchar(128) NOT NULL,
-	"fingerprint_key_version" varchar(32) NOT NULL,
+	"fingerprint_hmac" varchar(128),
+	"fingerprint_key_version" varchar(32),
 	"redaction_confirmed" boolean NOT NULL,
 	"status" varchar(24) DEFAULT 'pending_link' NOT NULL,
 	"linked_at" timestamp with time zone,
@@ -166,7 +166,7 @@ CREATE TABLE "installation_accounts" (
 	"deleted_at" timestamp with time zone,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "chk_installation_accounts_status" CHECK ("installation_accounts"."status" IN ('active', 'suspended', 'deleted'))
+	CONSTRAINT "chk_installation_accounts_status" CHECK ("installation_accounts"."status" IN ('active', 'suspended', 'deleting', 'deleted'))
 );
 --> statement-breakpoint
 CREATE TABLE "installation_challenges" (
@@ -434,3 +434,47 @@ INSERT INTO "platform_link_configs" ("platform", "capability", "mode", "app_uri_
   ('ctrip', 'hotel_search', 'web', NULL, 'https://m.ctrip.com/webapp/hotels/', '["m.ctrip.com"]', NOW(), true),
   ('meituan', 'place_search', 'web', NULL, 'https://i.meituan.com/', '["i.meituan.com"]', NOW(), true)
 ON CONFLICT ("platform", "capability") DO NOTHING;
+--> statement-breakpoint
+CREATE TABLE "user_feedback" (
+	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"installation_id" uuid,
+	"feedback_type" varchar(32) NOT NULL,
+	"source_type" varchar(24) NOT NULL,
+	"target_type" varchar(32) NOT NULL,
+	"target_id" uuid NOT NULL,
+	"message" text NOT NULL,
+	"status" varchar(24) DEFAULT 'open' NOT NULL,
+	"resolution_reason" text,
+	"created_by_admin_id" uuid,
+	"resolved_by_admin_id" uuid,
+	"expires_at" timestamp with time zone,
+	"resolved_at" timestamp with time zone,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
+	CONSTRAINT "chk_user_feedback_type" CHECK ("user_feedback"."feedback_type" IN ('appeal', 'supplement_request', 'correction', 'withdrawal')),
+	CONSTRAINT "chk_user_feedback_source" CHECK ("user_feedback"."source_type" IN ('installation', 'admin')),
+	CONSTRAINT "chk_user_feedback_status" CHECK ("user_feedback"."status" IN ('open', 'in_review', 'resolved', 'rejected', 'withdrawn')),
+	CONSTRAINT "chk_user_feedback_active_expiry" CHECK ("user_feedback"."feedback_type" NOT IN ('appeal', 'supplement_request') OR "user_feedback"."status" NOT IN ('open', 'in_review') OR "user_feedback"."expires_at" IS NOT NULL)
+);
+--> statement-breakpoint
+ALTER TABLE "observations" ADD COLUMN "moderation_reason" text;--> statement-breakpoint
+ALTER TABLE "observations" ADD COLUMN "moderation_version" integer DEFAULT 0 NOT NULL;--> statement-breakpoint
+ALTER TABLE "observations" ADD COLUMN "moderated_at" timestamp with time zone;--> statement-breakpoint
+ALTER TABLE "observations" ADD COLUMN "appeal_until" timestamp with time zone;--> statement-breakpoint
+ALTER TABLE "observations" ADD COLUMN "location_proof_passed" boolean DEFAULT false NOT NULL;--> statement-breakpoint
+ALTER TABLE "observations" ADD COLUMN "location_distance_bucket" varchar(24);--> statement-breakpoint
+ALTER TABLE "observations" ADD COLUMN "location_verified_at" timestamp with time zone;--> statement-breakpoint
+ALTER TABLE "verification_records_v2" ADD COLUMN "admin_review_status" varchar(24) DEFAULT 'unreviewed' NOT NULL;--> statement-breakpoint
+ALTER TABLE "verification_records_v2" ADD COLUMN "admin_review_reason" text;--> statement-breakpoint
+ALTER TABLE "verification_records_v2" ADD COLUMN "admin_reviewed_at" timestamp with time zone;--> statement-breakpoint
+ALTER TABLE "user_feedback" ADD CONSTRAINT "user_feedback_installation_id_installation_accounts_id_fk" FOREIGN KEY ("installation_id") REFERENCES "public"."installation_accounts"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "user_feedback" ADD CONSTRAINT "user_feedback_created_by_admin_id_admin_users_id_fk" FOREIGN KEY ("created_by_admin_id") REFERENCES "public"."admin_users"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "user_feedback" ADD CONSTRAINT "user_feedback_resolved_by_admin_id_admin_users_id_fk" FOREIGN KEY ("resolved_by_admin_id") REFERENCES "public"."admin_users"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
+CREATE INDEX "idx_user_feedback_queue" ON "user_feedback" USING btree ("feedback_type","target_type","status","updated_at","id");--> statement-breakpoint
+CREATE INDEX "idx_user_feedback_target" ON "user_feedback" USING btree ("target_type","target_id","created_at");--> statement-breakpoint
+CREATE INDEX "idx_user_feedback_expiry" ON "user_feedback" USING btree ("feedback_type","status","expires_at");--> statement-breakpoint
+CREATE UNIQUE INDEX "uq_user_feedback_active" ON "user_feedback" USING btree ("installation_id","feedback_type","target_type","target_id") WHERE "user_feedback"."status" IN ('open', 'in_review');--> statement-breakpoint
+CREATE INDEX "idx_observations_moderation_queue" ON "observations" USING btree ("moderation_status","updated_at");--> statement-breakpoint
+CREATE INDEX "idx_verification_records_v2_admin_review" ON "verification_records_v2" USING btree ("admin_review_status","created_at");--> statement-breakpoint
+ALTER TABLE "observations" ADD CONSTRAINT "chk_observation_moderation_status" CHECK ("observations"."moderation_status" IN ('pending', 'approved', 'rejected', 'withdrawn'));--> statement-breakpoint
+ALTER TABLE "verification_records_v2" ADD CONSTRAINT "chk_verification_admin_review_status" CHECK ("verification_records_v2"."admin_review_status" IN ('unreviewed', 'confirmed', 'flagged'));

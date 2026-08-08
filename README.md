@@ -11,8 +11,8 @@ EazyPath 是面向轮椅和行动不便用户的真实数据无障碍出行链 M
 | 匿名安装账户与偏好 | 已接真实 API，Keystore 签名和加密令牌存储 | 并发认证安全测试、可选手机号绑定 P1 |
 | 文字 Agent 与 SSE | 已接 Qwen、BullMQ、真实高德 POI、PostgreSQL 事件恢复 | 完整任务补充/取消端侧交互、状态机压力测试 |
 | AI 图片验真 | 已接 VLM、临时 tmpfs、成功/最终失败删除 | AI 验真图片的独立端侧脱敏编辑复用 |
-| 社区证据 | Android 已支持真实地点搜索、数据库字段定义动态表单、端侧人脸/敏感文字检测、手工补框、实际上传副本预览、脱敏分片续传、退出清理敏感草稿和待审核观测；后端已有字段类型校验、位置证明、撤回、复核与共识 | Android 瞬时位置证明、管理端受控证据图片审核闭环 |
-| 管理端 | 后端已有安全登录、30 分钟空闲/8 小时绝对会话、CSRF、改密、全会话撤销、RBAC 变更审计和真实列表 | 证据审核事务闭环、冲突结案、受权媒体操作和 UI 自动化测试 |
+| 社区证据 | Android 已支持真实地点搜索、数据库字段定义动态表单、端侧脱敏与分片续传；后端已有字段类型校验、一次性位置证明、撤回、审核、30 天申诉和社区复核 | Android 瞬时位置证明接入、社区治理自动派单与异常场景集成测试 |
+| 管理端 | 后端已有安全登录、会话/CSRF、RBAC、证据与 AI 验真审核、申诉处理、乐观锁、审计和受控脱敏媒体读取 | React 管理端按新审核 API 重构、完整可访问性交互和 UI 自动化测试 |
 | 语音 | Android 系统语音识别与 TTS 可用 | Qwen 实时 ASR/TTS WebSocket 和 PCM/Opus 流式采集 |
 | 部署 | Node 24、PG 18/PostGIS、Redis 8/BullMQ、Nginx Compose 已配置 | 当前 Compose 仅供受控测试；生产 TLS/WSS 证书与外部入口尚未配置 |
 
@@ -70,6 +70,17 @@ EAZYPATH_API_BASE_URL=https://api.example.com/
 
 除登录、身份读取和 CSRF 恢复外，管理端写请求必须同时携带 HttpOnly Session Cookie 和 `X-CSRF-Token`。管理员停用、角色变化或角色权限变化会立即撤销受影响会话；系统始终保留至少一个活跃超级管理员。角色与管理员写操作会在事务内重新读取操作者角色，普通管理员只能授予自身权限子集，`super_admin` 和 `*` 只能由超级管理员授予。连续失败仍记录账户锁定状态，但正确密码可立即恢复，避免匿名攻击者利用默认用户名持续阻断合法管理员。正式管理员密码至少 12 位，拒绝常见密码、包含用户名以及缺少字母或数字的密码。
 
+## 证据审核与申诉
+
+- `GET /api/v1/admin/reviews/observations` 与 `/:id`：按状态读取审核队列、结构化字段、粗粒度位置证明、脱敏媒体、用户反馈和审计历史
+- `POST /api/v1/admin/reviews/observations/:id/decision`：批准、驳回或要求补充；使用 `expected_version` 防止多个管理员覆盖结论
+- `GET /api/v1/admin/reviews/appeals` 与 `POST /appeals/:id/decision`：处理用户申诉，可重新进入待审、驳回或要求补充；写入请求必须回传 `expected_observation_version` 和 `expected_appeal_updated_at`
+- `GET /api/v1/admin/reviews/verifications` 与 `POST /verifications/:id/decision`：人工确认或标记 AI 验真结果，使用更新时间作乐观锁
+- `GET /api/v1/admin/reviews/media/:id/content`：只读取已关联、已确认脱敏且未删除的持久证据；响应禁止缓存，每次成功读取记录审计
+- `GET /api/v1/observations/:id/moderation`、`POST /:id/appeals` 与 `POST /:id/supplements`：匿名安装账户只能查看、申诉并响应自己观测的活动补充请求；补充可包含纠正后的结构化值和新脱敏图片，并必须回传 `expected_observation_version` 与 `expected_feedback_updated_at`
+
+社区观测初始为 `pending/U`，管理员批准最多提升为 `C`，不会自动产生官方 `A` 级证据。驳回图片保留至 30 天申诉期结束后再由清理任务删除；临近截止提交申诉或管理员要求补充时，系统提供 7 天有界响应窗口并把明确截止时间返回给客户端，整个申诉的媒体保留硬上限不超过原 30 天窗口结束后 7 天，重复要求补充也不能继续延长。每分钟维护任务会自动结案超时反馈并恢复媒体清理；文件物理删除成功时同步清除 HMAC 指纹与密钥版本，仅保留 `deleted_at` 等最小审计元数据，删除失败不会伪装成功。匿名账户删除会先进入 `deleting` 状态并立即阻止普通接口、撤销会话，再清理上传分片、媒体文件与指纹、反馈正文和注册挑战；社区观测同步停止公开，历史审计主体去标识化。同步清理失败时，每分钟维护任务继续重试，不依赖用户保持登录。重新受理或用户按时补充后回到待审核状态。用户撤回则立即标记过期。审核、媒体生命周期、贡献计数和审计写入保持在同一事务内，活动申诉必须从申诉队列处理。
+
 ## 不启动服务的检查
 
 安装依赖后，可以只做静态检查和构建：
@@ -120,13 +131,15 @@ API 与 Worker 暂时同容器是单机 MVP 的隐私约束：两者需要共享
 
 ## 数据库迁移
 
-项目使用 Drizzle Kit + Drizzle Migrator 管理 PostgreSQL 迁移，作用相当于 Java 项目中的 Flyway。当前仍在开发阶段，`Backend/drizzle/0000_baseline.sql` 是唯一基线 SQL，包含 26 张正式表、PostGIS 扩展和初始化字典；旧 Demo 表已从迁移历史移除。
+项目使用 Drizzle Kit + Drizzle Migrator 管理 PostgreSQL 迁移，作用相当于 Java 项目中的 Flyway。当前仍在开发阶段，`Backend/drizzle/0000_baseline.sql` 是唯一基线 SQL，包含 27 张正式表、PostGIS 扩展和初始化字典；旧 Demo 表已从迁移历史移除。
 
 - `src/db/schema.ts` 是表结构代码事实源
 - `drizzle.config.ts` 配置 schema、PostgreSQL dialect 和迁移目录
 - 当前开发阶段修改结构时直接同步 `src/db/schema.ts` 和 `0000_baseline.sql`，不得生成第二个 SQL；进入正式发布后再改用增量迁移
 - `npm run db:check` 检查 snapshot、journal 与 SQL 历史一致性
 - `npm run db:migrate` 使用 `drizzle-orm/postgres-js/migrator` 按 journal 执行未应用迁移，并记录到 `drizzle.__drizzle_migrations`
+
+开发期若某个本地数据库已经应用过旧版本 `0000_baseline.sql`，再次运行 `db:migrate` 不会把同一基线当作增量升级。应先备份需要保留的数据，再由维护者明确重建可丢弃的开发数据库；进入正式发布后禁止改写已发布基线，改用新的增量迁移。
 
 容器入口会自动执行 Drizzle 迁移和幂等管理员引导。手工执行前必须已经完成后端构建：
 

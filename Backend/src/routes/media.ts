@@ -5,6 +5,7 @@ import { getEnv } from '../config/env.js';
 import {
   db,
   evidenceMedia,
+  installationAccounts,
   mediaUploadParts,
   mediaUploadSessions,
 } from '../db/index.js';
@@ -48,17 +49,26 @@ mediaRouter.post('/uploads', async (c) => {
     const [existing] = await db.select().from(mediaUploadSessions).where(and(eq(mediaUploadSessions.installationId, c.get('installationId')), eq(mediaUploadSessions.idempotencyKey, idempotencyKey), gt(mediaUploadSessions.expiresAt, new Date()))).limit(1);
     if (existing) return ok(c, uploadResponse(existing));
   }
-  const [session] = await db.insert(mediaUploadSessions).values({
-    installationId: c.get('installationId'),
-    fileName: input.file_name,
-    mimeType: input.mime_type,
-    totalBytes: input.total_bytes,
-    totalParts: input.total_parts,
-    wholeSha256: input.sha256.toLowerCase(),
-    redactionConfirmed: true,
-    idempotencyKey,
-    expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
-  }).onConflictDoNothing().returning();
+  const session = await db.transaction(async (tx) => {
+    const [account] = await tx.select({ status: installationAccounts.status })
+      .from(installationAccounts)
+      .where(eq(installationAccounts.id, c.get('installationId')))
+      .for('update')
+      .limit(1);
+    if (account?.status !== 'active') return null;
+    const [created] = await tx.insert(mediaUploadSessions).values({
+      installationId: c.get('installationId'),
+      fileName: input.file_name,
+      mimeType: input.mime_type,
+      totalBytes: input.total_bytes,
+      totalParts: input.total_parts,
+      wholeSha256: input.sha256.toLowerCase(),
+      redactionConfirmed: true,
+      idempotencyKey,
+      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+    }).onConflictDoNothing().returning();
+    return created ?? null;
+  });
   if (!session && idempotencyKey) {
     const [concurrent] = await db.select().from(mediaUploadSessions).where(and(
       eq(mediaUploadSessions.installationId, c.get('installationId')),
@@ -66,7 +76,7 @@ mediaRouter.post('/uploads', async (c) => {
     )).limit(1);
     if (concurrent) return ok(c, uploadResponse(concurrent));
   }
-  if (!session) return fail(c, 500, 'MEDIA_UPLOAD_CREATE_FAILED', '无法创建上传会话', { retryable: true });
+  if (!session) return fail(c, 409, 'MEDIA_UPLOAD_CREATE_FAILED', '账户状态已变化或无法创建上传会话', { retryable: true });
   return ok(c, uploadResponse(session), '上传会话已创建', 201);
 });
 
@@ -87,11 +97,30 @@ mediaRouter.put('/uploads/:uploadId/parts/:partNo', async (c) => {
   if (bytes.length !== expectedLength) return fail(c, 422, 'MEDIA_PART_SIZE_INVALID', '分片大小与声明不一致');
   const declaredHash = c.req.header('x-part-sha256')?.toLowerCase();
   if (!declaredHash || sha256(bytes) !== declaredHash) return fail(c, 422, 'MEDIA_PART_HASH_MISMATCH', '分片校验失败');
-  const stored = await writeUploadPart(session.id, partNumber, bytes);
-  await db.insert(mediaUploadParts).values({ uploadId: session.id, partNumber, byteSize: bytes.length, sha256: stored.sha256, storagePath: stored.path }).onConflictDoUpdate({
-    target: [mediaUploadParts.uploadId, mediaUploadParts.partNumber],
-    set: { byteSize: bytes.length, sha256: stored.sha256, storagePath: stored.path },
+  const stored = await db.transaction(async (tx) => {
+    const [account] = await tx.select({ status: installationAccounts.status })
+      .from(installationAccounts)
+      .where(eq(installationAccounts.id, c.get('installationId')))
+      .for('update')
+      .limit(1);
+    if (account?.status !== 'active') return null;
+    const [current] = await tx.select({ status: mediaUploadSessions.status, expiresAt: mediaUploadSessions.expiresAt })
+      .from(mediaUploadSessions)
+      .where(and(
+        eq(mediaUploadSessions.id, session.id),
+        eq(mediaUploadSessions.installationId, c.get('installationId')),
+      ))
+      .for('update')
+      .limit(1);
+    if (!current || current.status !== 'uploading' || current.expiresAt <= new Date()) return null;
+    const written = await writeUploadPart(session.id, partNumber, bytes);
+    await tx.insert(mediaUploadParts).values({ uploadId: session.id, partNumber, byteSize: bytes.length, sha256: written.sha256, storagePath: written.path }).onConflictDoUpdate({
+      target: [mediaUploadParts.uploadId, mediaUploadParts.partNumber],
+      set: { byteSize: bytes.length, sha256: written.sha256, storagePath: written.path },
+    });
+    return written;
   });
+  if (!stored) return fail(c, 409, 'MEDIA_UPLOAD_NOT_ACTIVE', '上传会话或匿名账户状态已变化，请重新开始上传');
   return ok(c, { upload_id: session.id, part_number: partNumber, sha256: stored.sha256 });
 });
 
@@ -116,6 +145,12 @@ mediaRouter.post('/uploads/:uploadId/complete', async (c) => {
     const assembled = await assembleEvidenceFile(session.id, parts.map((part) => part.storagePath), session.wholeSha256);
     stored = assembled;
     const media = await db.transaction(async (tx) => {
+      const [account] = await tx.select({ status: installationAccounts.status })
+        .from(installationAccounts)
+        .where(eq(installationAccounts.id, c.get('installationId')))
+        .for('update')
+        .limit(1);
+      if (account?.status !== 'active') throw new Error('ACCOUNT_NOT_ACTIVE');
       const [created] = await tx.insert(evidenceMedia).values({
         installationId: c.get('installationId'),
         ...assembled,
@@ -158,7 +193,17 @@ mediaRouter.delete('/:id', async (c) => {
   const [media] = await db.select().from(evidenceMedia).where(and(eq(evidenceMedia.id, c.req.param('id')), eq(evidenceMedia.installationId, c.get('installationId')), isNull(evidenceMedia.deletedAt))).limit(1);
   if (!media) return fail(c, 404, 'MEDIA_NOT_FOUND', '媒体不存在');
   await removeEvidenceFile(media.storagePath);
-  await db.update(evidenceMedia).set({ status: 'deleted', deletedAt: new Date(), updatedAt: new Date() }).where(eq(evidenceMedia.id, media.id));
+  await db.update(evidenceMedia).set({
+    status: 'deleted',
+    fingerprintHmac: null,
+    fingerprintKeyVersion: null,
+    deletedAt: new Date(),
+    updatedAt: new Date(),
+  }).where(and(
+    eq(evidenceMedia.id, media.id),
+    eq(evidenceMedia.installationId, c.get('installationId')),
+    isNull(evidenceMedia.deletedAt),
+  ));
   return ok(c, { deleted: true });
 });
 

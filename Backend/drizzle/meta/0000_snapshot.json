@@ -1,5 +1,5 @@
 {
-  "id": "f4cb081d-c491-4ed1-a11d-d9ef7c75651f",
+  "id": "c3e5634e-5845-4515-8f9a-194a0d626cc0",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
@@ -92,6 +92,13 @@
           "primaryKey": false,
           "notNull": true
         },
+        "last_seen_at": {
+          "name": "last_seen_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
         "revoked_at": {
           "name": "revoked_at",
           "type": "timestamp with time zone",
@@ -118,6 +125,27 @@
             }
           ],
           "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "idx_admin_sessions_user_expiry": {
+          "name": "idx_admin_sessions_user_expiry",
+          "columns": [
+            {
+              "expression": "admin_user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "expires_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
           "concurrently": false,
           "method": "btree",
           "with": {}
@@ -1011,13 +1039,13 @@
           "name": "fingerprint_hmac",
           "type": "varchar(128)",
           "primaryKey": false,
-          "notNull": true
+          "notNull": false
         },
         "fingerprint_key_version": {
           "name": "fingerprint_key_version",
           "type": "varchar(32)",
           "primaryKey": false,
-          "notNull": true
+          "notNull": false
         },
         "redaction_confirmed": {
           "name": "redaction_confirmed",
@@ -1390,7 +1418,7 @@
       "checkConstraints": {
         "chk_installation_accounts_status": {
           "name": "chk_installation_accounts_status",
-          "value": "\"installation_accounts\".\"status\" IN ('active', 'suspended', 'deleted')"
+          "value": "\"installation_accounts\".\"status\" IN ('active', 'suspended', 'deleting', 'deleted')"
         }
       },
       "isRLSEnabled": false
@@ -1954,6 +1982,31 @@
           "notNull": true,
           "default": "'pending'"
         },
+        "moderation_reason": {
+          "name": "moderation_reason",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "moderation_version": {
+          "name": "moderation_version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "moderated_at": {
+          "name": "moderated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "appeal_until": {
+          "name": "appeal_until",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
         "evidence_grade": {
           "name": "evidence_grade",
           "type": "varchar(1)",
@@ -1971,6 +2024,25 @@
         "confidence": {
           "name": "confidence",
           "type": "numeric(4, 3)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "location_proof_passed": {
+          "name": "location_proof_passed",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "location_distance_bucket": {
+          "name": "location_distance_bucket",
+          "type": "varchar(24)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "location_verified_at": {
+          "name": "location_verified_at",
+          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
         },
@@ -2037,6 +2109,27 @@
             },
             {
               "expression": "expires_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "idx_observations_moderation_queue": {
+          "name": "idx_observations_moderation_queue",
+          "columns": [
+            {
+              "expression": "moderation_status",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "updated_at",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -2119,6 +2212,10 @@
       "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {
+        "chk_observation_moderation_status": {
+          "name": "chk_observation_moderation_status",
+          "value": "\"observations\".\"moderation_status\" IN ('pending', 'approved', 'rejected', 'withdrawn')"
+        },
         "chk_observation_grade": {
           "name": "chk_observation_grade",
           "value": "\"observations\".\"evidence_grade\" IN ('A', 'B', 'C', 'U')"
@@ -2788,6 +2885,298 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
+    "public.user_feedback": {
+      "name": "user_feedback",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "installation_id": {
+          "name": "installation_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "feedback_type": {
+          "name": "feedback_type",
+          "type": "varchar(32)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "source_type": {
+          "name": "source_type",
+          "type": "varchar(24)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "target_type": {
+          "name": "target_type",
+          "type": "varchar(32)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "target_id": {
+          "name": "target_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "message": {
+          "name": "message",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "status": {
+          "name": "status",
+          "type": "varchar(24)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'open'"
+        },
+        "resolution_reason": {
+          "name": "resolution_reason",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_by_admin_id": {
+          "name": "created_by_admin_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "resolved_by_admin_id": {
+          "name": "resolved_by_admin_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "expires_at": {
+          "name": "expires_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "resolved_at": {
+          "name": "resolved_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "idx_user_feedback_queue": {
+          "name": "idx_user_feedback_queue",
+          "columns": [
+            {
+              "expression": "feedback_type",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "target_type",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "status",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "updated_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "idx_user_feedback_target": {
+          "name": "idx_user_feedback_target",
+          "columns": [
+            {
+              "expression": "target_type",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "target_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "created_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "idx_user_feedback_expiry": {
+          "name": "idx_user_feedback_expiry",
+          "columns": [
+            {
+              "expression": "feedback_type",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "status",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "expires_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "uq_user_feedback_active": {
+          "name": "uq_user_feedback_active",
+          "columns": [
+            {
+              "expression": "installation_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "feedback_type",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "target_type",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "target_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"user_feedback\".\"status\" IN ('open', 'in_review')",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "user_feedback_installation_id_installation_accounts_id_fk": {
+          "name": "user_feedback_installation_id_installation_accounts_id_fk",
+          "tableFrom": "user_feedback",
+          "tableTo": "installation_accounts",
+          "columnsFrom": [
+            "installation_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "user_feedback_created_by_admin_id_admin_users_id_fk": {
+          "name": "user_feedback_created_by_admin_id_admin_users_id_fk",
+          "tableFrom": "user_feedback",
+          "tableTo": "admin_users",
+          "columnsFrom": [
+            "created_by_admin_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "user_feedback_resolved_by_admin_id_admin_users_id_fk": {
+          "name": "user_feedback_resolved_by_admin_id_admin_users_id_fk",
+          "tableFrom": "user_feedback",
+          "tableTo": "admin_users",
+          "columnsFrom": [
+            "resolved_by_admin_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "chk_user_feedback_type": {
+          "name": "chk_user_feedback_type",
+          "value": "\"user_feedback\".\"feedback_type\" IN ('appeal', 'supplement_request', 'correction', 'withdrawal')"
+        },
+        "chk_user_feedback_source": {
+          "name": "chk_user_feedback_source",
+          "value": "\"user_feedback\".\"source_type\" IN ('installation', 'admin')"
+        },
+        "chk_user_feedback_status": {
+          "name": "chk_user_feedback_status",
+          "value": "\"user_feedback\".\"status\" IN ('open', 'in_review', 'resolved', 'rejected', 'withdrawn')"
+        },
+        "chk_user_feedback_active_expiry": {
+          "name": "chk_user_feedback_active_expiry",
+          "value": "\"user_feedback\".\"feedback_type\" NOT IN ('appeal', 'supplement_request') OR \"user_feedback\".\"status\" NOT IN ('open', 'in_review') OR \"user_feedback\".\"expires_at\" IS NOT NULL"
+        }
+      },
+      "isRLSEnabled": false
+    },
     "public.user_profiles_v2": {
       "name": "user_profiles_v2",
       "schema": "",
@@ -2999,6 +3388,25 @@
           "primaryKey": false,
           "notNull": false
         },
+        "admin_review_status": {
+          "name": "admin_review_status",
+          "type": "varchar(24)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'unreviewed'"
+        },
+        "admin_review_reason": {
+          "name": "admin_review_reason",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "admin_reviewed_at": {
+          "name": "admin_reviewed_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -3020,6 +3428,27 @@
           "columns": [
             {
               "expression": "installation_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "created_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "idx_verification_records_v2_admin_review": {
+          "name": "idx_verification_records_v2_admin_review",
+          "columns": [
+            {
+              "expression": "admin_review_status",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -3081,7 +3510,12 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "chk_verification_admin_review_status": {
+          "name": "chk_verification_admin_review_status",
+          "value": "\"verification_records_v2\".\"admin_review_status\" IN ('unreviewed', 'confirmed', 'flagged')"
+        }
+      },
       "isRLSEnabled": false
     }
   },

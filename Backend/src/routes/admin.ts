@@ -1,8 +1,8 @@
 import { and, count, desc, eq, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
-import { createMiddleware } from 'hono/factory';
 import { z } from 'zod';
 import { requireAdmin, requireAdminCsrf } from '../auth/admin.js';
+import { requireAdminPermission } from '../auth/admin-permission.js';
 import { getEnv } from '../config/env.js';
 import {
   adminRoles,
@@ -18,7 +18,6 @@ import {
   places,
   platformLinkConfigs,
   queryClient,
-  verificationRecords,
 } from '../db/index.js';
 import { ADMIN_PERMISSION_CODES } from '../domain/admin-security.js';
 import { fail, ok } from '../lib/api-response.js';
@@ -32,6 +31,7 @@ import {
   type AccessResult,
 } from '../services/admin-access.js';
 import type { AppBindings } from '../types.js';
+import { adminReviewsRouter } from './admin-reviews.js';
 
 const placeSchema = z.object({
   name: z.string().min(1).max(160),
@@ -73,16 +73,9 @@ export const adminRouter = new Hono<AppBindings>();
 
 adminRouter.use('*', requireAdmin);
 adminRouter.use('*', requireAdminCsrf);
+adminRouter.route('/reviews', adminReviewsRouter);
 
-const requirePermission = (permission: string) => createMiddleware<AppBindings>(async (c, next) => {
-  const permissions = c.get('adminPermissions');
-  if (!permissions.includes('*') && !permissions.includes(permission)) {
-    return fail(c, 403, 'ADMIN_PERMISSION_DENIED', '没有执行此操作的权限');
-  }
-  await next();
-});
-
-adminRouter.get('/dashboard', requirePermission('dashboard.read'), async (c) => {
+adminRouter.get('/dashboard', requireAdminPermission('dashboard.read'), async (c) => {
   const now = new Date();
   const soon = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
   const [[pendingEvidence], [pendingReviews], [failedTasks], [expiringEvidence], queueCounts] = await Promise.all([
@@ -110,8 +103,8 @@ adminRouter.get('/dashboard', requirePermission('dashboard.read'), async (c) => 
   });
 });
 
-adminRouter.get('/places', requirePermission('places.read'), async (c) => ok(c, await db.select().from(places).orderBy(desc(places.updatedAt)).limit(100)));
-adminRouter.post('/places', requirePermission('places.write'), async (c) => {
+adminRouter.get('/places', requireAdminPermission('places.read'), async (c) => ok(c, await db.select().from(places).orderBy(desc(places.updatedAt)).limit(100)));
+adminRouter.post('/places', requireAdminPermission('places.write'), async (c) => {
   const parsed = placeSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return fail(c, 422, 'PLACE_INVALID', '地点参数无效');
   const rows = await queryClient<Array<{ id: string }>>`
@@ -125,7 +118,7 @@ adminRouter.post('/places', requirePermission('places.write'), async (c) => {
   return ok(c, { id }, '地点已创建', 201);
 });
 
-adminRouter.patch('/places/:id', requirePermission('places.write'), async (c) => {
+adminRouter.patch('/places/:id', requireAdminPermission('places.write'), async (c) => {
   const parsed = placeSchema.partial().safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return fail(c, 422, 'PLACE_INVALID', '地点参数无效');
   const update = parsed.data;
@@ -146,22 +139,8 @@ adminRouter.patch('/places/:id', requirePermission('places.write'), async (c) =>
   return ok(c, { id: existing.id });
 });
 
-adminRouter.get('/reviews', requirePermission('reviews.read'), async (c) => {
-  const rows = await db.select({ observation: observations, placeName: places.name }).from(observations).innerJoin(places, eq(observations.placeId, places.id)).orderBy(desc(observations.createdAt)).limit(100);
-  return ok(c, rows);
-});
-
-adminRouter.post('/reviews/:id/decision', requirePermission('reviews.decide'), async (c) => {
-  const parsed = z.object({ decision: z.enum(['accepted', 'rejected', 'pending']), reason: z.string().min(3).max(1000) }).safeParse(await c.req.json().catch(() => null));
-  if (!parsed.success) return fail(c, 422, 'REVIEW_DECISION_INVALID', '审核结论或理由无效');
-  const [record] = await db.update(observations).set({ moderationStatus: parsed.data.decision, evidenceGrade: parsed.data.decision === 'accepted' ? 'C' : 'U', updatedAt: new Date() }).where(eq(observations.id, c.req.param('id'))).returning();
-  if (!record) return fail(c, 404, 'OBSERVATION_NOT_FOUND', '观测不存在');
-  await audit(c, c.get('adminUserId'), 'observation.moderated', 'observation', record.id, parsed.data.reason, { decision: parsed.data.decision });
-  return ok(c, record);
-});
-
-adminRouter.get('/platform-links', requirePermission('platform_links.read'), async (c) => ok(c, await db.select().from(platformLinkConfigs).orderBy(platformLinkConfigs.platform)));
-adminRouter.post('/platform-links', requirePermission('platform_links.manage'), async (c) => {
+adminRouter.get('/platform-links', requireAdminPermission('platform_links.read'), async (c) => ok(c, await db.select().from(platformLinkConfigs).orderBy(platformLinkConfigs.platform)));
+adminRouter.post('/platform-links', requireAdminPermission('platform_links.manage'), async (c) => {
   const parsed = platformSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return fail(c, 422, 'PLATFORM_LINK_INVALID', '平台配置无效');
   const [record] = await db.insert(platformLinkConfigs).values({
@@ -180,8 +159,8 @@ adminRouter.post('/platform-links', requirePermission('platform_links.manage'), 
   return ok(c, record, '平台配置已保存');
 });
 
-adminRouter.get('/tasks', requirePermission('tasks.read'), async (c) => ok(c, await db.select().from(agentTasks).orderBy(desc(agentTasks.createdAt)).limit(100)));
-adminRouter.get('/community-reviews', requirePermission('reviews.read'), async (c) => ok(c, await db.select({
+adminRouter.get('/tasks', requireAdminPermission('tasks.read'), async (c) => ok(c, await db.select().from(agentTasks).orderBy(desc(agentTasks.createdAt)).limit(100)));
+adminRouter.get('/community-reviews', requireAdminPermission('reviews.read'), async (c) => ok(c, await db.select({
   id: communityReviewTasks.id,
   placeName: places.name,
   featureKey: featureDefinitions.featureKey,
@@ -193,19 +172,7 @@ adminRouter.get('/community-reviews', requirePermission('reviews.read'), async (
   createdAt: communityReviewTasks.createdAt,
   updatedAt: communityReviewTasks.updatedAt,
 }).from(communityReviewTasks).innerJoin(places, eq(communityReviewTasks.placeId, places.id)).innerJoin(featureDefinitions, eq(communityReviewTasks.featureDefinitionId, featureDefinitions.id)).orderBy(desc(communityReviewTasks.updatedAt)).limit(100)));
-adminRouter.get('/verifications', requirePermission('verifications.read'), async (c) => ok(c, await db.select({
-  id: verificationRecords.id,
-  scene: verificationRecords.scene,
-  status: verificationRecords.status,
-  confidence: verificationRecords.confidence,
-  riskLevel: verificationRecords.riskLevel,
-  modelName: verificationRecords.modelName,
-  originalMediaStored: verificationRecords.originalMediaStored,
-  temporaryMediaDeletedAt: verificationRecords.temporaryMediaDeletedAt,
-  failureCode: verificationRecords.failureCode,
-  createdAt: verificationRecords.createdAt,
-}).from(verificationRecords).orderBy(desc(verificationRecords.createdAt)).limit(100)));
-adminRouter.get('/installations', requirePermission('installations.read'), async (c) => ok(c, await db.select({
+adminRouter.get('/installations', requireAdminPermission('installations.read'), async (c) => ok(c, await db.select({
   id: installationAccounts.id,
   installationGuid: installationAccounts.installationGuid,
   status: installationAccounts.status,
@@ -213,7 +180,7 @@ adminRouter.get('/installations', requirePermission('installations.read'), async
   lastSeenAt: installationAccounts.lastSeenAt,
   createdAt: installationAccounts.createdAt,
 }).from(installationAccounts).orderBy(desc(installationAccounts.lastSeenAt)).limit(100)));
-adminRouter.get('/admin-users', requirePermission('admin_users.read'), async (c) => ok(c, await db.select({
+adminRouter.get('/admin-users', requireAdminPermission('admin_users.read'), async (c) => ok(c, await db.select({
   id: adminUsers.id,
   username: adminUsers.username,
   status: adminUsers.status,
@@ -223,7 +190,7 @@ adminRouter.get('/admin-users', requirePermission('admin_users.read'), async (c)
   lastLoginAt: adminUsers.lastLoginAt,
   createdAt: adminUsers.createdAt,
 }).from(adminUsers).innerJoin(adminRoles, eq(adminUsers.roleId, adminRoles.id)).orderBy(adminUsers.username)));
-adminRouter.post('/admin-users', requirePermission('admin_users.manage'), async (c) => {
+adminRouter.post('/admin-users', requireAdminPermission('admin_users.manage'), async (c) => {
   const parsed = adminUserCreateSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return fail(c, 422, 'ADMIN_USER_INVALID', '管理员参数无效');
   const result = await createAdminUser({
@@ -233,7 +200,7 @@ adminRouter.post('/admin-users', requirePermission('admin_users.manage'), async 
   if (!result.ok) return accessFailure(c, result);
   return ok(c, result.value, '管理员已创建', 201);
 });
-adminRouter.patch('/admin-users/:id', requirePermission('admin_users.manage'), async (c) => {
+adminRouter.patch('/admin-users/:id', requireAdminPermission('admin_users.manage'), async (c) => {
   const parsed = adminUserAccessSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return fail(c, 422, 'ADMIN_USER_ACCESS_INVALID', '管理员角色、状态或理由无效');
   const result = await updateAdminUserAccess({
@@ -245,7 +212,7 @@ adminRouter.patch('/admin-users/:id', requirePermission('admin_users.manage'), a
   if (!result.ok) return accessFailure(c, result);
   return ok(c, { id: result.value.id, role_id: result.value.roleId, status: result.value.status });
 });
-adminRouter.post('/admin-users/:id/revoke-sessions', requirePermission('admin_users.manage'), async (c) => {
+adminRouter.post('/admin-users/:id/revoke-sessions', requireAdminPermission('admin_users.manage'), async (c) => {
   const parsed = adminReasonSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return fail(c, 422, 'ADMIN_REASON_INVALID', '必须填写会话撤销理由');
   const result = await revokeManagedAdminSessions({
@@ -255,11 +222,11 @@ adminRouter.post('/admin-users/:id/revoke-sessions', requirePermission('admin_us
   if (!result.ok) return accessFailure(c, result);
   return ok(c, { id: result.value.id, sessions_revoked: true });
 });
-adminRouter.get('/roles', requirePermission('admin_users.read'), async (c) => ok(c, {
+adminRouter.get('/roles', requireAdminPermission('admin_users.read'), async (c) => ok(c, {
   items: await db.select().from(adminRoles).orderBy(adminRoles.code),
   available_permissions: ADMIN_PERMISSION_CODES,
 }));
-adminRouter.post('/roles', requirePermission('admin_users.manage'), async (c) => {
+adminRouter.post('/roles', requireAdminPermission('admin_users.manage'), async (c) => {
   const parsed = adminRoleSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return fail(c, 422, 'ADMIN_ROLE_INVALID', '角色参数无效');
   const result = await createAdminRole({
@@ -269,7 +236,7 @@ adminRouter.post('/roles', requirePermission('admin_users.manage'), async (c) =>
   if (!result.ok) return accessFailure(c, result);
   return ok(c, result.value, '角色已创建', 201);
 });
-adminRouter.patch('/roles/:id', requirePermission('admin_users.manage'), async (c) => {
+adminRouter.patch('/roles/:id', requireAdminPermission('admin_users.manage'), async (c) => {
   const parsed = adminRoleUpdateSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return fail(c, 422, 'ADMIN_ROLE_INVALID', '角色参数无效');
   const result = await updateAdminRole({
@@ -279,9 +246,9 @@ adminRouter.patch('/roles/:id', requirePermission('admin_users.manage'), async (
   if (!result.ok) return accessFailure(c, result);
   return ok(c, result.value, '角色已更新');
 });
-adminRouter.get('/audit-events', requirePermission('audit.read'), async (c) => ok(c, await db.select().from(auditEvents).orderBy(desc(auditEvents.createdAt)).limit(200)));
-adminRouter.get('/media', requirePermission('media.read'), async (c) => ok(c, await db.select({ id: evidenceMedia.id, mimeType: evidenceMedia.mimeType, byteSize: evidenceMedia.byteSize, status: evidenceMedia.status, redactionConfirmed: evidenceMedia.redactionConfirmed, linkedAt: evidenceMedia.linkedAt, expiresAt: evidenceMedia.expiresAt, deletedAt: evidenceMedia.deletedAt, createdAt: evidenceMedia.createdAt }).from(evidenceMedia).orderBy(desc(evidenceMedia.createdAt)).limit(100)));
-adminRouter.get('/system', requirePermission('system.read'), async (c) => ok(c, {
+adminRouter.get('/audit-events', requireAdminPermission('audit.read'), async (c) => ok(c, await db.select().from(auditEvents).orderBy(desc(auditEvents.createdAt)).limit(200)));
+adminRouter.get('/media', requireAdminPermission('media.read'), async (c) => ok(c, await db.select({ id: evidenceMedia.id, mimeType: evidenceMedia.mimeType, byteSize: evidenceMedia.byteSize, status: evidenceMedia.status, redactionConfirmed: evidenceMedia.redactionConfirmed, linkedAt: evidenceMedia.linkedAt, expiresAt: evidenceMedia.expiresAt, deletedAt: evidenceMedia.deletedAt, createdAt: evidenceMedia.createdAt }).from(evidenceMedia).orderBy(desc(evidenceMedia.createdAt)).limit(100)));
+adminRouter.get('/system', requireAdminPermission('system.read'), async (c) => ok(c, {
   environment: getEnv().APP_ENV,
   public_urls: { api: getEnv().APP_PUBLIC_URL, admin: getEnv().ADMIN_PUBLIC_URL },
   models: { agent: getEnv().AGENT_MODEL, vision: getEnv().VISION_MODEL, asr: getEnv().ASR_MODEL, tts: getEnv().TTS_MODEL },

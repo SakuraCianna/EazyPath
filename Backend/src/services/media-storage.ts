@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { getEnv, parseKeyring } from '../config/env.js';
 import { hmacSha256 } from '../lib/crypto.js';
@@ -98,6 +98,13 @@ export async function removeEvidenceFile(storagePath: string): Promise<void> {
   const target = path.resolve(storagePath);
   if (path.dirname(target) !== root) throw new Error('INVALID_EVIDENCE_PATH');
   await rm(target, { force: true });
+}
+
+export async function readEvidenceFile(storagePath: string): Promise<Buffer> {
+  const root = await realpath(path.resolve(getEnv().MEDIA_EVIDENCE_DIR));
+  const target = await realpath(path.resolve(storagePath));
+  if (path.dirname(target) !== root) throw new Error('INVALID_EVIDENCE_PATH');
+  return readFile(target);
 }
 
 export async function mediaDiskUsageBytes(): Promise<number> {
