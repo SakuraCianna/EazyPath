@@ -8,15 +8,18 @@ import {
   communityReviewVotes,
   db,
   evidenceMedia,
+  facilities,
   featureDefinitions,
   installationAccounts,
   locationProofs,
   observationMedia,
   observations,
   places,
+  placeUnits,
 } from '../db/index.js';
 import { fail, ok } from '../lib/api-response.js';
 import { requireUser } from '../middleware/auth.js';
+import { isFeatureValueCompatible } from '../domain/feature-values.js';
 import type { AppBindings } from '../types.js';
 
 const observationSchema = z.object({
@@ -54,8 +57,22 @@ observationsRouter.post('/', async (c) => {
   const parsed = observationSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return fail(c, 422, 'OBSERVATION_INVALID', '现场观测参数无效');
   const input = parsed.data;
+  if (input.place_unit_id && input.facility_id) return fail(c, 422, 'OBSERVATION_TARGET_INVALID', '地点单元和设施不能同时指定');
+  const [place] = await db.select({ id: places.id }).from(places).where(eq(places.id, input.place_id)).limit(1);
+  if (!place) return fail(c, 404, 'PLACE_NOT_FOUND', '地点不存在');
+  if (input.place_unit_id) {
+    const [unit] = await db.select({ id: placeUnits.id }).from(placeUnits).where(and(eq(placeUnits.id, input.place_unit_id), eq(placeUnits.placeId, input.place_id))).limit(1);
+    if (!unit) return fail(c, 422, 'OBSERVATION_TARGET_INVALID', '地点单元不属于所选地点');
+  }
+  if (input.facility_id) {
+    const [facility] = await db.select({ id: facilities.id }).from(facilities).where(and(eq(facilities.id, input.facility_id), eq(facilities.placeId, input.place_id))).limit(1);
+    if (!facility) return fail(c, 422, 'OBSERVATION_TARGET_INVALID', '设施不属于所选地点');
+  }
   const [feature] = await db.select().from(featureDefinitions).where(and(eq(featureDefinitions.featureKey, input.feature_key), eq(featureDefinitions.active, true))).limit(1);
   if (!feature) return fail(c, 422, 'FEATURE_NOT_SUPPORTED', '该无障碍字段尚未配置');
+  const targetType = input.facility_id ? 'facility' : input.place_unit_id ? 'place_unit' : 'place';
+  if (!feature.targetTypes.includes(targetType)) return fail(c, 422, 'FEATURE_TARGET_INVALID', '该无障碍字段不适用于当前观测对象');
+  if (!isFeatureValueCompatible(feature.valueType, input.value)) return fail(c, 422, 'FEATURE_VALUE_INVALID', '现场观测值与字段类型不匹配');
   const mediaRows = input.media_ids.length === 0 ? [] : await Promise.all(input.media_ids.map(async (mediaId) => {
     const [media] = await db.select().from(evidenceMedia).where(and(eq(evidenceMedia.id, mediaId), eq(evidenceMedia.installationId, c.get('installationId')), eq(evidenceMedia.status, 'pending_link'), isNull(evidenceMedia.deletedAt))).limit(1);
     return media;

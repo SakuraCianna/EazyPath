@@ -18,6 +18,18 @@ import type { AppBindings } from '../types.js';
 export const placesRouter = new Hono<AppBindings>();
 placesRouter.use('*', requireUser);
 
+placesRouter.get('/feature-definitions', async (c) => {
+  const rows = await db.select({
+    feature_key: featureDefinitions.featureKey,
+    display_name: featureDefinitions.displayName,
+    value_type: featureDefinitions.valueType,
+    unit: featureDefinitions.unit,
+    target_types: featureDefinitions.targetTypes,
+    schema_version: featureDefinitions.schemaVersion,
+  }).from(featureDefinitions).where(eq(featureDefinitions.active, true)).orderBy(featureDefinitions.displayName);
+  return ok(c, rows.filter((row) => row.target_types.includes('place')));
+});
+
 placesRouter.get('/search', async (c) => {
   const query = z.object({
     q: z.string().trim().min(1).max(80),

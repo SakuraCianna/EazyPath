@@ -25,6 +25,7 @@ import androidx.compose.material.icons.filled.Map
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PhotoCamera
+import androidx.compose.material.icons.filled.AddLocationAlt
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -55,6 +56,7 @@ fun HomeScreen(
     onProfile: () -> Unit,
     onVerification: () -> Unit,
     onCommunity: () -> Unit,
+    onEvidenceSubmission: () -> Unit,
     onMap: () -> Unit,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
@@ -121,6 +123,7 @@ fun HomeScreen(
             Text("现场工具", fontWeight = FontWeight.Bold, fontSize = 18.sp)
             Shortcut("基础地图与证据提示", "高德没有轮椅路线模式，未验证路段需现场复核。", Icons.Default.Map, onMap)
             Shortcut("AI 图片验真", "原图仅用于本次识别，处理完成后服务端立即删除。", Icons.Default.PhotoCamera, onVerification)
+            Shortcut("提交现场无障碍信息", "选择真实地点，端侧脱敏照片后提交待审核证据。", Icons.Default.AddLocationAlt, onEvidenceSubmission)
             Shortcut("社区复核", "帮助其他用户确认过期或冲突的无障碍信息。", Icons.Default.Groups, onCommunity)
             Shortcut("我的无障碍偏好", "门宽、台阶、卫生间、语音与大字设置。", Icons.Default.Person, onProfile)
         }
