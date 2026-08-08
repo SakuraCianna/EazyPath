@@ -498,10 +498,14 @@ export const adminSessions = pgTable(
     tokenHash: varchar('token_hash', { length: 128 }).notNull(),
     csrfHash: varchar('csrf_hash', { length: 128 }).notNull(),
     expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    lastSeenAt: timestamp('last_seen_at', { withTimezone: true }).defaultNow().notNull(),
     revokedAt: timestamp('revoked_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
   },
-  (table) => [uniqueIndex('uq_admin_sessions_token').on(table.tokenHash)],
+  (table) => [
+    uniqueIndex('uq_admin_sessions_token').on(table.tokenHash),
+    index('idx_admin_sessions_user_expiry').on(table.adminUserId, table.expiresAt),
+  ],
 );
 
 export const auditEvents = pgTable(

@@ -1,14 +1,11 @@
-import argon2 from 'argon2';
-import { and, count, desc, eq, isNull, sql } from 'drizzle-orm';
-import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
+import { and, count, desc, eq, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { createMiddleware } from 'hono/factory';
 import { z } from 'zod';
-import { ADMIN_COOKIE_NAME, adminTokenHash, requireAdmin, requireAdminCsrf } from '../auth/admin.js';
+import { requireAdmin, requireAdminCsrf } from '../auth/admin.js';
 import { getEnv } from '../config/env.js';
 import {
   adminRoles,
-  adminSessions,
   adminUsers,
   agentTasks,
   auditEvents,
@@ -23,12 +20,19 @@ import {
   queryClient,
   verificationRecords,
 } from '../db/index.js';
-import { randomToken } from '../lib/crypto.js';
+import { ADMIN_PERMISSION_CODES } from '../domain/admin-security.js';
 import { fail, ok } from '../lib/api-response.js';
 import { taskQueue } from '../queue/task-queue.js';
+import {
+  createAdminRole,
+  createAdminUser,
+  revokeManagedAdminSessions,
+  updateAdminRole,
+  updateAdminUserAccess,
+  type AccessResult,
+} from '../services/admin-access.js';
 import type { AppBindings } from '../types.js';
 
-const loginSchema = z.object({ username: z.string().min(3).max(64), password: z.string().min(6).max(256) });
 const placeSchema = z.object({
   name: z.string().min(1).max(160),
   category_code: z.string().min(1).max(64),
@@ -45,44 +49,27 @@ const platformSchema = z.object({
   allowed_hosts: z.array(z.string().min(1).max(255)).max(20).default([]),
   enabled: z.boolean(),
 });
+const adminUserCreateSchema = z.object({
+  username: z.string().min(3).max(64).regex(/^[a-z0-9._-]+$/),
+  password: z.string().min(12).max(256),
+  role_id: z.uuid(),
+  reason: z.string().min(6).max(1000),
+});
+const adminUserAccessSchema = z.object({
+  role_id: z.uuid().optional(),
+  status: z.enum(['active', 'disabled']).optional(),
+  reason: z.string().min(6).max(1000),
+}).refine((value) => value.role_id !== undefined || value.status !== undefined);
+const adminRoleSchema = z.object({
+  code: z.string().min(3).max(64).regex(/^[a-z][a-z0-9_]*$/),
+  name: z.string().min(2).max(128),
+  permissions: z.array(z.string()).min(1).max(64),
+  reason: z.string().min(6).max(1000),
+});
+const adminRoleUpdateSchema = adminRoleSchema.omit({ code: true });
+const adminReasonSchema = z.object({ reason: z.string().min(6).max(1000) });
 
-export const adminAuthRouter = new Hono<AppBindings>();
 export const adminRouter = new Hono<AppBindings>();
-
-adminAuthRouter.post('/login', async (c) => {
-  const parsed = loginSchema.safeParse(await c.req.json().catch(() => null));
-  if (!parsed.success) return fail(c, 401, 'ADMIN_LOGIN_FAILED', '用户名或密码错误');
-  const [user] = await db.select().from(adminUsers).where(eq(adminUsers.username, parsed.data.username)).limit(1);
-  if (!user || user.status !== 'active' || (user.lockedUntil && user.lockedUntil > new Date())) return fail(c, 401, 'ADMIN_LOGIN_FAILED', '用户名或密码错误');
-  const valid = await argon2.verify(user.passwordHash, parsed.data.password).catch(() => false);
-  if (!valid) {
-    const failures = user.failedLoginCount + 1;
-    await db.update(adminUsers).set({ failedLoginCount: failures, lockedUntil: failures >= 5 ? new Date(Date.now() + 15 * 60 * 1000) : null, updatedAt: new Date() }).where(eq(adminUsers.id, user.id));
-    return fail(c, 401, 'ADMIN_LOGIN_FAILED', '用户名或密码错误');
-  }
-  const sessionToken = randomToken(48);
-  const csrfToken = randomToken(32);
-  const expiresAt = new Date(Date.now() + 8 * 60 * 60 * 1000);
-  await db.insert(adminSessions).values({ adminUserId: user.id, tokenHash: adminTokenHash(sessionToken), csrfHash: adminTokenHash(csrfToken), expiresAt });
-  await db.update(adminUsers).set({ failedLoginCount: 0, lockedUntil: null, lastLoginAt: new Date(), updatedAt: new Date() }).where(eq(adminUsers.id, user.id));
-  setCookie(c, ADMIN_COOKIE_NAME, sessionToken, {
-    httpOnly: true,
-    secure: getEnv().APP_ENV !== 'development',
-    sameSite: 'Strict',
-    path: '/api/v1/admin',
-    expires: expiresAt,
-  });
-  await audit(c, user.id, 'admin.login', 'admin_user', user.id);
-  return ok(c, { username: user.username, csrf_token: csrfToken, expires_at: expiresAt });
-});
-
-adminAuthRouter.post('/logout', requireAdmin, requireAdminCsrf, async (c) => {
-  const token = getCookie(c, ADMIN_COOKIE_NAME);
-  if (token) await db.update(adminSessions).set({ revokedAt: new Date() }).where(and(eq(adminSessions.tokenHash, adminTokenHash(token)), isNull(adminSessions.revokedAt)));
-  deleteCookie(c, ADMIN_COOKIE_NAME, { path: '/api/v1/admin' });
-  await audit(c, c.get('adminUserId'), 'admin.logout', 'admin_user', c.get('adminUserId'));
-  return ok(c, { logged_out: true });
-});
 
 adminRouter.use('*', requireAdmin);
 adminRouter.use('*', requireAdminCsrf);
@@ -226,15 +213,72 @@ adminRouter.get('/installations', requirePermission('installations.read'), async
   lastSeenAt: installationAccounts.lastSeenAt,
   createdAt: installationAccounts.createdAt,
 }).from(installationAccounts).orderBy(desc(installationAccounts.lastSeenAt)).limit(100)));
-adminRouter.get('/admin-users', requirePermission('admin_users.read'), async (c) => ok(c, await db.select({ id: adminUsers.id, username: adminUsers.username, status: adminUsers.status, roleId: adminUsers.roleId, lastLoginAt: adminUsers.lastLoginAt, createdAt: adminUsers.createdAt }).from(adminUsers).orderBy(adminUsers.username)));
+adminRouter.get('/admin-users', requirePermission('admin_users.read'), async (c) => ok(c, await db.select({
+  id: adminUsers.id,
+  username: adminUsers.username,
+  status: adminUsers.status,
+  roleId: adminUsers.roleId,
+  roleCode: adminRoles.code,
+  roleName: adminRoles.name,
+  lastLoginAt: adminUsers.lastLoginAt,
+  createdAt: adminUsers.createdAt,
+}).from(adminUsers).innerJoin(adminRoles, eq(adminUsers.roleId, adminRoles.id)).orderBy(adminUsers.username)));
 adminRouter.post('/admin-users', requirePermission('admin_users.manage'), async (c) => {
-  const parsed = z.object({ username: z.string().min(3).max(64), password: z.string().min(12).max(256), role_id: z.uuid() }).safeParse(await c.req.json().catch(() => null));
+  const parsed = adminUserCreateSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return fail(c, 422, 'ADMIN_USER_INVALID', '管理员参数无效');
-  const [user] = await db.insert(adminUsers).values({ username: parsed.data.username, passwordHash: await argon2.hash(parsed.data.password, { type: argon2.argon2id }), roleId: parsed.data.role_id }).returning({ id: adminUsers.id, username: adminUsers.username });
-  await audit(c, c.get('adminUserId'), 'admin_user.created', 'admin_user', user?.id);
-  return ok(c, user, '管理员已创建', 201);
+  const result = await createAdminUser({
+    actorId: c.get('adminUserId'), username: parsed.data.username, password: parsed.data.password,
+    roleId: parsed.data.role_id, reason: parsed.data.reason, requestId: c.get('requestId'),
+  });
+  if (!result.ok) return accessFailure(c, result);
+  return ok(c, result.value, '管理员已创建', 201);
 });
-adminRouter.get('/roles', requirePermission('admin_users.read'), async (c) => ok(c, await db.select().from(adminRoles).orderBy(adminRoles.code)));
+adminRouter.patch('/admin-users/:id', requirePermission('admin_users.manage'), async (c) => {
+  const parsed = adminUserAccessSchema.safeParse(await c.req.json().catch(() => null));
+  if (!parsed.success) return fail(c, 422, 'ADMIN_USER_ACCESS_INVALID', '管理员角色、状态或理由无效');
+  const result = await updateAdminUserAccess({
+    actorId: c.get('adminUserId'), targetId: c.req.param('id'), reason: parsed.data.reason,
+    requestId: c.get('requestId'),
+    ...(parsed.data.role_id ? { roleId: parsed.data.role_id } : {}),
+    ...(parsed.data.status ? { status: parsed.data.status } : {}),
+  });
+  if (!result.ok) return accessFailure(c, result);
+  return ok(c, { id: result.value.id, role_id: result.value.roleId, status: result.value.status });
+});
+adminRouter.post('/admin-users/:id/revoke-sessions', requirePermission('admin_users.manage'), async (c) => {
+  const parsed = adminReasonSchema.safeParse(await c.req.json().catch(() => null));
+  if (!parsed.success) return fail(c, 422, 'ADMIN_REASON_INVALID', '必须填写会话撤销理由');
+  const result = await revokeManagedAdminSessions({
+    actorId: c.get('adminUserId'), targetId: c.req.param('id'), reason: parsed.data.reason,
+    requestId: c.get('requestId'),
+  });
+  if (!result.ok) return accessFailure(c, result);
+  return ok(c, { id: result.value.id, sessions_revoked: true });
+});
+adminRouter.get('/roles', requirePermission('admin_users.read'), async (c) => ok(c, {
+  items: await db.select().from(adminRoles).orderBy(adminRoles.code),
+  available_permissions: ADMIN_PERMISSION_CODES,
+}));
+adminRouter.post('/roles', requirePermission('admin_users.manage'), async (c) => {
+  const parsed = adminRoleSchema.safeParse(await c.req.json().catch(() => null));
+  if (!parsed.success) return fail(c, 422, 'ADMIN_ROLE_INVALID', '角色参数无效');
+  const result = await createAdminRole({
+    actorId: c.get('adminUserId'), code: parsed.data.code, name: parsed.data.name,
+    permissions: parsed.data.permissions, reason: parsed.data.reason, requestId: c.get('requestId'),
+  });
+  if (!result.ok) return accessFailure(c, result);
+  return ok(c, result.value, '角色已创建', 201);
+});
+adminRouter.patch('/roles/:id', requirePermission('admin_users.manage'), async (c) => {
+  const parsed = adminRoleUpdateSchema.safeParse(await c.req.json().catch(() => null));
+  if (!parsed.success) return fail(c, 422, 'ADMIN_ROLE_INVALID', '角色参数无效');
+  const result = await updateAdminRole({
+    actorId: c.get('adminUserId'), roleId: c.req.param('id'), name: parsed.data.name,
+    permissions: parsed.data.permissions, reason: parsed.data.reason, requestId: c.get('requestId'),
+  });
+  if (!result.ok) return accessFailure(c, result);
+  return ok(c, result.value, '角色已更新');
+});
 adminRouter.get('/audit-events', requirePermission('audit.read'), async (c) => ok(c, await db.select().from(auditEvents).orderBy(desc(auditEvents.createdAt)).limit(200)));
 adminRouter.get('/media', requirePermission('media.read'), async (c) => ok(c, await db.select({ id: evidenceMedia.id, mimeType: evidenceMedia.mimeType, byteSize: evidenceMedia.byteSize, status: evidenceMedia.status, redactionConfirmed: evidenceMedia.redactionConfirmed, linkedAt: evidenceMedia.linkedAt, expiresAt: evidenceMedia.expiresAt, deletedAt: evidenceMedia.deletedAt, createdAt: evidenceMedia.createdAt }).from(evidenceMedia).orderBy(desc(evidenceMedia.createdAt)).limit(100)));
 adminRouter.get('/system', requirePermission('system.read'), async (c) => ok(c, {
@@ -257,4 +301,14 @@ async function audit(
   metadata: Record<string, unknown> = {},
 ): Promise<void> {
   await db.insert(auditEvents).values({ actorType: 'admin', actorId, action, targetType, targetId, reason, metadata, requestId: c.get('requestId') as string });
+}
+
+function accessFailure(c: Parameters<typeof fail>[0], result: Extract<AccessResult<unknown>, { ok: false }>) {
+  const status = result.code.endsWith('_NOT_FOUND') ? 404
+    : result.code === 'ADMIN_GRANT_FORBIDDEN' ? 403
+    : result.code.endsWith('_EXISTS')
+      || result.code === 'ADMIN_SELF_ACCESS_CHANGE_FORBIDDEN'
+      || result.code === 'ADMIN_LAST_SUPER_ADMIN_REQUIRED' ? 409
+      : 422;
+  return fail(c, status, result.code, result.message);
 }
