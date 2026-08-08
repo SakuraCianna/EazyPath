@@ -9,10 +9,10 @@ const optionalString = z.preprocess(
 const environmentSchema = z.object({
   APP_ENV: z.enum(['development', 'test', 'staging', 'production']).default('development'),
   APP_PUBLIC_URL: z.url().default('http://localhost:3000'),
-  ADMIN_PUBLIC_URL: z.url().default('http://localhost:4173'),
-  CORS_ALLOWED_ORIGINS: z.string().default('http://localhost:4173'),
-  DATABASE_URL: z.string().min(1),
-  REDIS_URL: z.string().min(1),
+  ADMIN_PUBLIC_URL: z.url().default('http://localhost'),
+  CORS_ALLOWED_ORIGINS: z.string().default('http://localhost,http://localhost:4173,http://localhost:5173'),
+  DATABASE_URL: z.string().min(1).default('postgresql://postgres:postgres@localhost:5432/eazypath'),
+  REDIS_URL: z.string().min(1).default('redis://localhost:6379'),
   AUTH_TOKEN_SECRET: z.string().min(32),
   ADMIN_SESSION_SECRET: z.string().min(32),
   DATA_ENCRYPTION_KEY_CURRENT_VERSION: z.string().min(1).default('v1'),
@@ -21,7 +21,7 @@ const environmentSchema = z.object({
   MEDIA_FINGERPRINT_KEYRING: z.string().min(1),
   ADMIN_BOOTSTRAP_USERNAME: z.preprocess(
     (value) => value === '' ? undefined : value,
-    z.string().min(3).optional(),
+    z.string().min(3).default('sakura'),
   ),
   ADMIN_BOOTSTRAP_PASSWORD_FILE: optionalString,
   ADMIN_BOOTSTRAP_PASSWORD: z.preprocess(
@@ -34,7 +34,6 @@ const environmentSchema = z.object({
   ASR_MODEL: z.string().default('qwen3-asr-flash-realtime'),
   TTS_MODEL: z.string().default('qwen-audio-3.0-tts-plus'),
   AMAP_WEB_SERVICE_KEY: z.string().min(1),
-  AMAP_ANDROID_KEY: optionalString,
   MEDIA_TEMP_DIR: z.string().default('./data/verification-temp'),
   MEDIA_UPLOAD_STAGING_DIR: z.string().default('./data/upload-staging'),
   MEDIA_EVIDENCE_DIR: z.string().default('./data/evidence'),
@@ -42,7 +41,6 @@ const environmentSchema = z.object({
   MEDIA_QUOTA_BYTES: z.coerce.number().int().positive().default(5_368_709_120),
   SSE_RESUME_WINDOW_SECONDS: z.coerce.number().int().positive().default(86_400),
   VOICE_WS_MAX_SESSION_SECONDS: z.coerce.number().int().positive().default(70),
-  LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
   TRUST_PROXY: booleanString.default(false),
   PORT: z.coerce.number().int().min(1).max(65_535).default(3000),
   WORKER_CONCURRENCY: z.coerce.number().int().min(1).max(50).default(4),
@@ -60,6 +58,23 @@ export function getEnv(): AppEnv {
   }
 
   const env = parsed.data;
+  const placeholderValues = [
+    env.DATABASE_URL,
+    env.AUTH_TOKEN_SECRET,
+    env.ADMIN_SESSION_SECRET,
+    env.DATA_ENCRYPTION_KEYRING,
+    env.MEDIA_FINGERPRINT_KEYRING,
+    env.DASHSCOPE_API_KEY,
+    env.AMAP_WEB_SERVICE_KEY,
+  ];
+  if (placeholderValues.some((value) => value.toLowerCase().includes('replace_with'))) {
+    throw new Error('检测到未替换的占位配置, 请先运行同步脚本并填写真实服务 Key');
+  }
+  if (env.APP_ENV !== 'development' && env.APP_ENV !== 'test') {
+    if (!process.env.DATABASE_URL || !process.env.REDIS_URL) {
+      throw new Error('staging/production 必须显式提供 DATABASE_URL 和 REDIS_URL');
+    }
+  }
   const origins = env.CORS_ALLOWED_ORIGINS.split(',').map((origin) => origin.trim());
   if (env.APP_ENV === 'production' && origins.includes('*')) {
     throw new Error('生产环境禁止使用通配 CORS Origin');

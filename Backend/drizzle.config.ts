@@ -12,9 +12,7 @@ export default defineConfig({
   out: './drizzle',
   dialect: 'postgresql',
   dbCredentials: {
-    url: process.env.DATABASE_URL ?? (() => {
-      throw new Error('Drizzle Kit 需要 DATABASE_URL');
-    })(),
+    url: process.env.DATABASE_URL ?? 'postgresql://postgres:postgres@localhost:5432/eazypath',
   },
   verbose: true,
   strict: true,

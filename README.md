@@ -33,24 +33,26 @@ EazyPath 是面向轮椅和行动不便用户的真实数据无障碍出行链 M
 
 ## 配置
 
-后端配置位于 `Backend/.env`，模板位于 `Backend/.env.example`。同步脚本会保留已有值、迁移旧变量名，并为缺失的本地密钥生成随机值：
+后端配置位于 `Backend/.env`，模板位于 `Backend/.env.example`。日常文件只保留密钥、管理员引导方式、Docker 数据库密码和未来平台凭据；模型名、内部服务地址、目录、限额、端口与并发使用代码或 Compose 的安全默认值。同步脚本会保留模板继续管理的已有值、迁移旧变量名，并为缺失的本地密钥生成随机值：
 
 ```powershell
 Set-Location .\Backend
 node .\scripts\sync-env.mjs
 ```
 
-首次部署前至少检查以下配置：
+当前模板为 18 项。携程、美团、滴滴、12306 和高德 Web 安全密钥即使暂时为空也会保留，获得正式授权或启用对应能力后直接填写。`DATABASE_DOCKER_URL` 由同步脚本根据 URL 编码后的 PostgreSQL 密码生成，不要手工拼接。首次部署前至少检查：
 
 - `DASHSCOPE_API_KEY`
 - `AMAP_WEB_SERVICE_KEY`
-- `DATABASE_URL` 与 `DATABASE_DOCKER_URL`
 - `AUTH_TOKEN_SECRET`、`ADMIN_SESSION_SECRET` 和两个独立 keyring
-- `ADMIN_BOOTSTRAP_USERNAME` 与开发环境的 `ADMIN_BOOTSTRAP_PASSWORD`
+- Docker 测试部署的 `POSTGRES_PASSWORD`，至少 16 位且仅使用字母、数字、下划线或连字符，避免 Compose 二次插值
+- 开发环境的 `ADMIN_BOOTSTRAP_PASSWORD`，初始用户名默认是 `sakura`
 
-staging/production 禁止使用 `ADMIN_BOOTSTRAP_PASSWORD`，应通过 `ADMIN_BOOTSTRAP_PASSWORD_FILE` 提供一次性 Secret。管理员写入数据库的是 Argon2id 哈希，引导脚本幂等执行且不会打印密码。
+staging/production 必须通过部署环境显式提供 `DATABASE_URL` 和 `REDIS_URL`，禁止回退到本地默认地址；同时禁止使用 `ADMIN_BOOTSTRAP_PASSWORD`，应通过 `ADMIN_BOOTSTRAP_PASSWORD_FILE` 提供一次性 Secret。管理员写入数据库的是 Argon2id 哈希，引导脚本幂等执行且不会打印密码。
 
-Android 构建参数放在未提交的 Gradle 用户配置或 CI Secret 中：
+同步脚本只会移除仍等于旧默认值的冗余字段；如果发现非默认的公开地址、CORS、模型、目录、限额或并发覆盖，会中止并列出字段名，避免静默丢失自定义配置。应先把这些覆盖迁移到服务器部署环境，再重新同步。若从 `.env.example` 复制后执行同步，脚本会替换密码、签名密钥和 keyring 的示例占位值；第三方服务 Key 不会伪造，未填写时启动校验会明确拒绝。
+
+Android Key 不进入后端 `.env`。同步脚本发现旧 `.env` 中存在非空 `AMAP_ANDROID_KEY` 时，会把它迁移到被 Git 忽略的 `App/local.properties`，并保留 Android Studio 已写入的 SDK 路径；没有旧值时，需要参考 `App/local.properties.example` 把字段追加到本机 `local.properties`，或通过 CI Secret 设置 `ORG_GRADLE_PROJECT_AMAP_ANDROID_KEY`，由 Gradle 官方项目属性机制注入：
 
 ```properties
 AMAP_ANDROID_KEY=替换为绑定包名和签名的AndroidKey
