@@ -1,0 +1,13 @@
+.git
+.idea
+.vscode
+App
+Backend
+Admin/node_modules
+Admin/dist
+**/.env
+**/.env.*
+**/node_modules
+**/dist
+**/build
+*.log
