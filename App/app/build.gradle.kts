@@ -68,6 +68,8 @@ dependencies {
     implementation(libs.okhttp.logging)
     implementation(libs.okhttp.sse)
     implementation(libs.gson)
+    implementation(libs.mlkit.face)
+    implementation(libs.mlkit.text.chinese)
     implementation("com.amap.api:3dmap-location-search:10.1.200_loc6.4.9_sea9.7.4")
 
     testImplementation(libs.junit)

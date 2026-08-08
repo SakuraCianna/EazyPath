@@ -12,6 +12,7 @@ import retrofit2.http.POST
 import retrofit2.http.PUT
 import retrofit2.http.Part
 import retrofit2.http.Path
+import retrofit2.http.Query
 
 data class ApiEnvelope<T>(
     val code: String,
@@ -148,6 +149,65 @@ data class VoteRequest(
     @SerializedName("location_proof_id") val locationProofId: String? = null,
 )
 
+data class PlaceAccessibility(
+    val status: String,
+    @SerializedName("verified_feature_count") val verifiedFeatureCount: Int = 0,
+    val disclosure: String? = null,
+)
+
+data class PlaceSearchItem(
+    val id: String,
+    val name: String,
+    val address: String?,
+    val accessibility: PlaceAccessibility,
+)
+
+data class FeatureDefinition(
+    @SerializedName("feature_key") val featureKey: String,
+    @SerializedName("display_name") val displayName: String,
+    @SerializedName("value_type") val valueType: String,
+    val unit: String?,
+    @SerializedName("target_types") val targetTypes: List<String>,
+    @SerializedName("schema_version") val schemaVersion: Int,
+)
+
+data class UploadInitializeRequest(
+    @SerializedName("file_name") val fileName: String,
+    @SerializedName("mime_type") val mimeType: String,
+    @SerializedName("total_bytes") val totalBytes: Int,
+    @SerializedName("total_parts") val totalParts: Int,
+    val sha256: String,
+    @SerializedName("redaction_confirmed") val redactionConfirmed: Boolean = true,
+)
+
+data class UploadSessionData(
+    @SerializedName("upload_id") val uploadId: String,
+    val status: String,
+    @SerializedName("part_size") val partSize: Int,
+    @SerializedName("total_parts") val totalParts: Int,
+    @SerializedName("completed_media_id") val completedMediaId: String? = null,
+    @SerializedName("received_parts") val receivedParts: List<ReceivedUploadPart> = emptyList(),
+)
+
+data class ReceivedUploadPart(@SerializedName("part_number") val partNumber: Int)
+
+data class CompletedMedia(
+    @SerializedName("media_id") val mediaId: String,
+    val status: String,
+)
+
+data class ObservationRequest(
+    @SerializedName("place_id") val placeId: String,
+    @SerializedName("feature_key") val featureKey: String,
+    val value: JsonElement,
+    @SerializedName("media_ids") val mediaIds: List<String>,
+)
+
+data class ObservationData(
+    val id: String,
+    val moderationStatus: String,
+)
+
 interface EazyPathApiService {
     @POST("api/v1/installations/challenges")
     suspend fun createChallenge(@Body request: ChallengeRequest): ApiEnvelope<ChallengeData>
@@ -188,4 +248,33 @@ interface EazyPathApiService {
 
     @POST("api/v1/review-tasks/{id}/submissions")
     suspend fun submitReview(@Path("id") id: String, @Body request: VoteRequest): ApiEnvelope<JsonElement>
+
+    @GET("api/v1/places/search")
+    suspend fun searchPlaces(@Query("q") query: String, @Query("region") region: String = "江西省"): ApiEnvelope<List<PlaceSearchItem>>
+
+    @GET("api/v1/places/feature-definitions")
+    suspend fun getFeatureDefinitions(): ApiEnvelope<List<FeatureDefinition>>
+
+    @POST("api/v1/media/uploads")
+    suspend fun initializeUpload(
+        @Header("Idempotency-Key") idempotencyKey: String,
+        @Body request: UploadInitializeRequest,
+    ): ApiEnvelope<UploadSessionData>
+
+    @GET("api/v1/media/uploads/{uploadId}")
+    suspend fun getUpload(@Path("uploadId") uploadId: String): ApiEnvelope<UploadSessionData>
+
+    @PUT("api/v1/media/uploads/{uploadId}/parts/{partNumber}")
+    suspend fun uploadPart(
+        @Path("uploadId") uploadId: String,
+        @Path("partNumber") partNumber: Int,
+        @Header("X-Part-SHA256") sha256: String,
+        @Body body: RequestBody,
+    ): ApiEnvelope<JsonElement>
+
+    @POST("api/v1/media/uploads/{uploadId}/complete")
+    suspend fun completeUpload(@Path("uploadId") uploadId: String): ApiEnvelope<CompletedMedia>
+
+    @POST("api/v1/observations")
+    suspend fun createObservation(@Body request: ObservationRequest): ApiEnvelope<ObservationData>
 }

@@ -176,5 +176,6 @@ function uploadResponse(session: typeof mediaUploadSessions.$inferSelect) {
     part_size: MEDIA_PART_BYTES,
     total_parts: session.totalParts,
     expires_at: session.expiresAt,
+    completed_media_id: session.completedMediaId,
   };
 }

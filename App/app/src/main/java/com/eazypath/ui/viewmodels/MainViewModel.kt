@@ -1,23 +1,35 @@
 package com.eazypath.ui.viewmodels
 
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Rect
 import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.eazypath.data.EazyPathRepository
+import com.eazypath.data.media.EvidenceImageAnalysis
+import com.eazypath.data.media.PreparedEvidence
+import com.eazypath.data.network.FeatureDefinition
 import com.eazypath.data.network.InteractionProfile
 import com.eazypath.data.network.MobilityProfile
+import com.eazypath.data.network.PlaceSearchItem
 import com.eazypath.data.network.ProfileData
 import com.eazypath.data.network.ReviewTask
 import com.eazypath.data.network.TaskDetails
 import com.eazypath.data.network.VerificationDetails
+import com.google.gson.JsonElement
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 data class MainUiState(
     val sessionReady: Boolean = false,
@@ -35,12 +47,30 @@ data class MainUiState(
     val reviewTasks: List<ReviewTask> = emptyList(),
     val reviewsLoading: Boolean = false,
     val reviewsError: String? = null,
+    val placeResults: List<PlaceSearchItem> = emptyList(),
+    val evidenceFeatureDefinitions: List<FeatureDefinition> = emptyList(),
+    val evidenceFeaturesLoading: Boolean = false,
+    val placeSearchLoading: Boolean = false,
+    val evidenceAnalysis: EvidenceImageAnalysis? = null,
+    val evidenceAnalysisVersion: Int = 0,
+    val evidencePreview: Bitmap? = null,
+    val preparedEvidence: PreparedEvidence? = null,
+    val evidenceImageLoading: Boolean = false,
+    val evidenceSubmitting: Boolean = false,
+    val evidenceError: String? = null,
+    val evidenceNotice: String? = null,
+    val evidenceSubmissionVersion: Int = 0,
 )
 
 class MainViewModel(private val repository: EazyPathRepository) : ViewModel() {
     private val _state = MutableStateFlow(MainUiState())
     val state: StateFlow<MainUiState> = _state.asStateFlow()
     private var taskEventsJob: Job? = null
+    private var placeSearchJob: Job? = null
+    private var evidenceImageJob: Job? = null
+    private var evidenceSubmitJob: Job? = null
+    private var evidenceImageGeneration: Long = 0
+    private var evidenceSubmitGeneration: Long = 0
     private var activePrompt: String? = null
 
     init {
@@ -119,6 +149,234 @@ class MainViewModel(private val repository: EazyPathRepository) : ViewModel() {
                 .onSuccess { loadReviewTasks() }
                 .onFailure { _state.value = _state.value.copy(reviewsError = it.userMessage()) }
         }
+    }
+
+    fun searchEvidencePlaces(query: String) {
+        if (query.isBlank()) return
+        placeSearchJob?.cancel()
+        placeSearchJob = viewModelScope.launch {
+            _state.value = _state.value.copy(placeSearchLoading = true, evidenceError = null, evidenceNotice = null)
+            try {
+                val places = repository.searchPlaces(query)
+                _state.value = _state.value.copy(placeResults = places, placeSearchLoading = false)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                _state.value = _state.value.copy(placeSearchLoading = false, evidenceError = error.userMessage())
+            }
+        }
+    }
+
+    fun loadEvidenceFeatureDefinitions() {
+        if (_state.value.evidenceFeatureDefinitions.isNotEmpty() || _state.value.evidenceFeaturesLoading) return
+        viewModelScope.launch {
+            _state.value = _state.value.copy(evidenceFeaturesLoading = true, evidenceError = null)
+            runCatching { repository.getEvidenceFeatureDefinitions() }
+                .onSuccess { definitions ->
+                    _state.value = _state.value.copy(
+                        evidenceFeatureDefinitions = definitions,
+                        evidenceFeaturesLoading = false,
+                    )
+                }
+                .onFailure { error ->
+                    _state.value = _state.value.copy(evidenceFeaturesLoading = false, evidenceError = error.userMessage())
+                }
+        }
+    }
+
+    fun analyzeEvidenceImage(uri: Uri) {
+        val previousJob = evidenceImageJob
+        val generation = ++evidenceImageGeneration
+        previousJob?.cancel()
+        evidenceImageJob = viewModelScope.launch(Dispatchers.Default) {
+            previousJob?.cancelAndJoin()
+            if (generation != evidenceImageGeneration) return@launch
+            val shouldAnalyze = withContext(Dispatchers.Main.immediate) {
+                if (generation != evidenceImageGeneration) false else {
+                    releaseEvidenceImages()
+                    _state.value = _state.value.copy(evidenceImageLoading = true, evidenceError = null, evidenceNotice = null)
+                    true
+                }
+            }
+            if (!shouldAnalyze) return@launch
+            var unpublishedAnalysis: EvidenceImageAnalysis? = null
+            try {
+                val analysis = repository.analyzeEvidenceImage(uri)
+                unpublishedAnalysis = analysis
+                if (generation != evidenceImageGeneration) {
+                    analysis.bitmap.recycle()
+                    unpublishedAnalysis = null
+                    return@launch
+                }
+                withContext(Dispatchers.Main.immediate) {
+                    if (generation != evidenceImageGeneration) {
+                        analysis.bitmap.recycle()
+                        unpublishedAnalysis = null
+                        return@withContext
+                    }
+                    _state.value = _state.value.copy(
+                        evidenceAnalysis = analysis,
+                        evidenceAnalysisVersion = _state.value.evidenceAnalysisVersion + 1,
+                        evidenceImageLoading = false,
+                    )
+                    unpublishedAnalysis = null
+                }
+            } catch (error: CancellationException) {
+                unpublishedAnalysis?.bitmap?.takeUnless { it.isRecycled }?.recycle()
+                throw error
+            } catch (error: Throwable) {
+                unpublishedAnalysis?.bitmap?.takeUnless { it.isRecycled }?.recycle()
+                if (generation == evidenceImageGeneration) {
+                    withContext(Dispatchers.Main.immediate) {
+                        if (generation == evidenceImageGeneration) {
+                            _state.value = _state.value.copy(evidenceImageLoading = false, evidenceError = error.userMessage())
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fun prepareEvidencePreview(redactionRegions: List<Rect>) {
+        val analysis = _state.value.evidenceAnalysis ?: return
+        val previousJob = evidenceImageJob
+        previousJob?.cancel()
+        clearEvidencePreview()
+        val generation = ++evidenceImageGeneration
+        evidenceImageJob = viewModelScope.launch(Dispatchers.Default) {
+            previousJob?.cancelAndJoin()
+            if (generation != evidenceImageGeneration) return@launch
+            val shouldPrepare = withContext(Dispatchers.Main.immediate) {
+                if (generation == evidenceImageGeneration) {
+                    _state.value = _state.value.copy(evidenceImageLoading = true, evidenceError = null)
+                    true
+                } else {
+                    false
+                }
+            }
+            if (!shouldPrepare) return@launch
+            var unpublishedPreview: Bitmap? = null
+            try {
+                val prepared = repository.prepareEvidence(analysis, redactionRegions)
+                val preview = BitmapFactory.decodeByteArray(prepared.bytes, 0, prepared.bytes.size)
+                    ?: error("无法生成脱敏预览")
+                unpublishedPreview = preview
+                if (generation != evidenceImageGeneration) {
+                    preview.recycle()
+                    unpublishedPreview = null
+                    return@launch
+                }
+                withContext(Dispatchers.Main.immediate) {
+                    if (generation == evidenceImageGeneration) {
+                        _state.value = _state.value.copy(preparedEvidence = prepared, evidencePreview = preview, evidenceImageLoading = false)
+                        unpublishedPreview = null
+                    }
+                }
+                unpublishedPreview?.takeUnless { it.isRecycled }?.recycle()
+                unpublishedPreview = null
+            } catch (error: CancellationException) {
+                unpublishedPreview?.takeUnless { it.isRecycled }?.recycle()
+                throw error
+            } catch (error: Throwable) {
+                unpublishedPreview?.takeUnless { it.isRecycled }?.recycle()
+                if (generation == evidenceImageGeneration) {
+                    withContext(Dispatchers.Main.immediate) {
+                        if (generation == evidenceImageGeneration) {
+                            _state.value = _state.value.copy(evidenceImageLoading = false, evidenceError = error.userMessage())
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fun clearEvidencePreview() {
+        evidenceImageGeneration += 1
+        evidenceImageJob?.cancel()
+        _state.value = _state.value.copy(
+            evidencePreview = null,
+            preparedEvidence = null,
+            evidenceImageLoading = false,
+        )
+    }
+
+    fun submitObservation(
+        placeId: String,
+        featureKey: String,
+        value: JsonElement,
+        includeImage: Boolean,
+    ) {
+        if (evidenceSubmitJob?.isActive == true) return
+        val submitGeneration = ++evidenceSubmitGeneration
+        evidenceSubmitJob = viewModelScope.launch {
+            _state.value = _state.value.copy(evidenceSubmitting = true, evidenceError = null, evidenceNotice = null)
+            runCatching {
+                val evidence = if (includeImage) _state.value.preparedEvidence ?: error("请先生成并确认最终脱敏预览") else null
+                repository.submitObservation(placeId, featureKey, value, evidence)
+            }.onSuccess {
+                if (submitGeneration != evidenceSubmitGeneration) return@onSuccess
+                releaseEvidenceImages()
+                _state.value = _state.value.copy(
+                    evidenceSubmitting = false,
+                    evidenceAnalysis = null,
+                    evidencePreview = null,
+                    preparedEvidence = null,
+                    placeResults = emptyList(),
+                    evidenceNotice = "现场信息已提交，当前状态为待审核，不会立即作为无障碍结论展示。",
+                    evidenceSubmissionVersion = _state.value.evidenceSubmissionVersion + 1,
+                )
+            }.onFailure {
+                if (submitGeneration == evidenceSubmitGeneration) {
+                    _state.value = _state.value.copy(evidenceSubmitting = false, evidenceError = it.userMessage())
+                }
+            }
+        }
+    }
+
+    private fun releaseEvidenceImages() {
+        _state.value = _state.value.copy(evidenceAnalysis = null, evidencePreview = null, preparedEvidence = null)
+    }
+
+    fun removeEvidenceImage() {
+        clearEvidenceDraft(clearPlaceResults = false)
+    }
+
+    fun discardEvidenceDraft() {
+        clearEvidenceDraft(clearPlaceResults = true)
+    }
+
+    private fun clearEvidenceDraft(clearPlaceResults: Boolean) {
+        val imageJob = evidenceImageJob
+        val submitJob = evidenceSubmitJob
+        evidenceImageGeneration += 1
+        evidenceSubmitGeneration += 1
+        imageJob?.cancel()
+        submitJob?.cancel()
+        if (clearPlaceResults) placeSearchJob?.cancel()
+        _state.value = _state.value.copy(
+            placeResults = if (clearPlaceResults) emptyList() else _state.value.placeResults,
+            evidenceAnalysis = null,
+            evidencePreview = null,
+            preparedEvidence = null,
+            evidenceImageLoading = false,
+            evidenceSubmitting = false,
+            placeSearchLoading = false,
+            evidenceError = null,
+            evidenceNotice = null,
+        )
+        viewModelScope.launch {
+            imageJob?.cancelAndJoin()
+            submitJob?.cancelAndJoin()
+        }
+    }
+
+    override fun onCleared() {
+        evidenceImageGeneration += 1
+        evidenceSubmitGeneration += 1
+        evidenceImageJob?.cancel()
+        evidenceSubmitJob?.cancel()
+        placeSearchJob?.cancel()
+        super.onCleared()
     }
 
     private fun bootstrap() {

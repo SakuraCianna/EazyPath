@@ -6,6 +6,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import com.eazypath.ui.screens.AccessibleMapScreen
 import com.eazypath.ui.screens.CommunityReviewScreen
+import com.eazypath.ui.screens.EvidenceSubmissionScreen
 import com.eazypath.ui.screens.HomeScreen
 import com.eazypath.ui.screens.ProfileScreen
 import com.eazypath.ui.screens.TravelChainScreen
@@ -22,6 +23,7 @@ private sealed class Screen(val route: String) {
     data object Profile : Screen("profile")
     data object Verification : Screen("verification")
     data object Community : Screen("community")
+    data object EvidenceSubmission : Screen("evidence-submission")
     data object Map : Screen("map")
 }
 
@@ -35,6 +37,7 @@ fun EazyPathNavGraph(navController: NavHostController, viewModel: MainViewModel)
                 onProfile = { navController.navigate(Screen.Profile.route) },
                 onVerification = { navController.navigate(Screen.Verification.route) },
                 onCommunity = { navController.navigate(Screen.Community.route) },
+                onEvidenceSubmission = { navController.navigate(Screen.EvidenceSubmission.route) },
                 onMap = { navController.navigate(Screen.Map.route) },
             )
         }
@@ -45,6 +48,7 @@ fun EazyPathNavGraph(navController: NavHostController, viewModel: MainViewModel)
         composable(Screen.Profile.route) { ProfileScreen(viewModel) { navController.popBackStack() } }
         composable(Screen.Verification.route) { VerificationScreen(viewModel) { navController.popBackStack() } }
         composable(Screen.Community.route) { CommunityReviewScreen(viewModel) { navController.popBackStack() } }
+        composable(Screen.EvidenceSubmission.route) { EvidenceSubmissionScreen(viewModel) { navController.popBackStack() } }
         composable(Screen.Map.route) { AccessibleMapScreen { navController.popBackStack() } }
     }
 }
