@@ -43,7 +43,7 @@ export const installationAccounts = pgTable(
   },
   (table) => [
     uniqueIndex('uq_installation_accounts_guid').on(table.installationGuid),
-    check('chk_installation_accounts_status', sql`${table.status} IN ('active', 'suspended', 'deleted')`),
+    check('chk_installation_accounts_status', sql`${table.status} IN ('active', 'suspended', 'deleting', 'deleted')`),
   ],
 );
 
@@ -279,8 +279,8 @@ export const evidenceMedia = pgTable(
     byteSize: integer('byte_size').notNull(),
     width: integer('width'),
     height: integer('height'),
-    fingerprintHmac: varchar('fingerprint_hmac', { length: 128 }).notNull(),
-    fingerprintKeyVersion: varchar('fingerprint_key_version', { length: 32 }).notNull(),
+    fingerprintHmac: varchar('fingerprint_hmac', { length: 128 }),
+    fingerprintKeyVersion: varchar('fingerprint_key_version', { length: 32 }),
     redactionConfirmed: boolean('redaction_confirmed').notNull(),
     status: varchar('status', { length: 24 }).default('pending_link').notNull(),
     linkedAt: timestamp('linked_at', { withTimezone: true }),
@@ -303,9 +303,16 @@ export const observations = pgTable(
     valueJson: jsonb('value_json').notNull(),
     evidenceSource: varchar('evidence_source', { length: 32 }).notNull(),
     moderationStatus: varchar('moderation_status', { length: 24 }).default('pending').notNull(),
+    moderationReason: text('moderation_reason'),
+    moderationVersion: integer('moderation_version').default(0).notNull(),
+    moderatedAt: timestamp('moderated_at', { withTimezone: true }),
+    appealUntil: timestamp('appeal_until', { withTimezone: true }),
     evidenceGrade: varchar('evidence_grade', { length: 1 }).default('U').notNull(),
     freshnessStatus: varchar('freshness_status', { length: 24 }).default('current').notNull(),
     confidence: numeric('confidence', { precision: 4, scale: 3 }),
+    locationProofPassed: boolean('location_proof_passed').default(false).notNull(),
+    locationDistanceBucket: varchar('location_distance_bucket', { length: 24 }),
+    locationVerifiedAt: timestamp('location_verified_at', { withTimezone: true }),
     observedAt: timestamp('observed_at', { withTimezone: true }),
     expiresAt: timestamp('expires_at', { withTimezone: true }),
     withdrawnAt: timestamp('withdrawn_at', { withTimezone: true }),
@@ -319,6 +326,8 @@ export const observations = pgTable(
       table.freshnessStatus,
       table.expiresAt,
     ),
+    index('idx_observations_moderation_queue').on(table.moderationStatus, table.updatedAt),
+    check('chk_observation_moderation_status', sql`${table.moderationStatus} IN ('pending', 'approved', 'rejected', 'withdrawn')`),
     check('chk_observation_grade', sql`${table.evidenceGrade} IN ('A', 'B', 'C', 'U')`),
   ],
 );
@@ -352,10 +361,17 @@ export const verificationRecords = pgTable(
     originalMediaStored: boolean('original_media_stored').default(false).notNull(),
     temporaryMediaDeletedAt: timestamp('temporary_media_deleted_at', { withTimezone: true }),
     failureCode: varchar('failure_code', { length: 64 }),
+    adminReviewStatus: varchar('admin_review_status', { length: 24 }).default('unreviewed').notNull(),
+    adminReviewReason: text('admin_review_reason'),
+    adminReviewedAt: timestamp('admin_reviewed_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
   },
-  (table) => [index('idx_verification_records_v2_owner').on(table.installationId, table.createdAt)],
+  (table) => [
+    index('idx_verification_records_v2_owner').on(table.installationId, table.createdAt),
+    index('idx_verification_records_v2_admin_review').on(table.adminReviewStatus, table.createdAt),
+    check('chk_verification_admin_review_status', sql`${table.adminReviewStatus} IN ('unreviewed', 'confirmed', 'flagged')`),
+  ],
 );
 
 export const communityReviewTasks = pgTable(
@@ -505,6 +521,41 @@ export const adminSessions = pgTable(
   (table) => [
     uniqueIndex('uq_admin_sessions_token').on(table.tokenHash),
     index('idx_admin_sessions_user_expiry').on(table.adminUserId, table.expiresAt),
+  ],
+);
+
+export const userFeedback = pgTable(
+  'user_feedback',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    installationId: uuid('installation_id').references(() => installationAccounts.id, { onDelete: 'set null' }),
+    feedbackType: varchar('feedback_type', { length: 32 }).notNull(),
+    sourceType: varchar('source_type', { length: 24 }).notNull(),
+    targetType: varchar('target_type', { length: 32 }).notNull(),
+    targetId: uuid('target_id').notNull(),
+    message: text('message').notNull(),
+    status: varchar('status', { length: 24 }).default('open').notNull(),
+    resolutionReason: text('resolution_reason'),
+    createdByAdminId: uuid('created_by_admin_id').references(() => adminUsers.id, { onDelete: 'set null' }),
+    resolvedByAdminId: uuid('resolved_by_admin_id').references(() => adminUsers.id, { onDelete: 'set null' }),
+    expiresAt: timestamp('expires_at', { withTimezone: true }),
+    resolvedAt: timestamp('resolved_at', { withTimezone: true }),
+    ...timestamps,
+  },
+  (table) => [
+    index('idx_user_feedback_queue').on(table.feedbackType, table.targetType, table.status, table.updatedAt, table.id),
+    index('idx_user_feedback_target').on(table.targetType, table.targetId, table.createdAt),
+    index('idx_user_feedback_expiry').on(table.feedbackType, table.status, table.expiresAt),
+    uniqueIndex('uq_user_feedback_active').on(
+      table.installationId,
+      table.feedbackType,
+      table.targetType,
+      table.targetId,
+    ).where(sql`${table.status} IN ('open', 'in_review')`),
+    check('chk_user_feedback_type', sql`${table.feedbackType} IN ('appeal', 'supplement_request', 'correction', 'withdrawal')`),
+    check('chk_user_feedback_source', sql`${table.sourceType} IN ('installation', 'admin')`),
+    check('chk_user_feedback_status', sql`${table.status} IN ('open', 'in_review', 'resolved', 'rejected', 'withdrawn')`),
+    check('chk_user_feedback_active_expiry', sql`${table.feedbackType} NOT IN ('appeal', 'supplement_request') OR ${table.status} NOT IN ('open', 'in_review') OR ${table.expiresAt} IS NOT NULL`),
   ],
 );
 

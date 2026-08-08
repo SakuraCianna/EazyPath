@@ -102,7 +102,7 @@ installationsRouter.post('/register', async (c) => {
         )).limit(1);
       }
     }
-    if (!current || current.publicKeySpki !== input.public_key_spki) return null;
+    if (!current || current.publicKeySpki !== input.public_key_spki || current.status !== 'active') return null;
     await tx.insert(userProfiles).values({
       installationId: current.id,
       mobility: {
@@ -129,9 +129,11 @@ installationsRouter.post('/register', async (c) => {
   });
   if (!account) return registrationFailure(c);
 
+  const session = await createUserSession(account.id);
+  if (!session) return registrationFailure(c);
   return ok(c, {
     installation_id: account.id,
-    ...(await createUserSession(account.id)),
+    ...session,
   }, '安装账户已就绪');
 });
 

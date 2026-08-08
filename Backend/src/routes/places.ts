@@ -41,7 +41,7 @@ placesRouter.get('/search', async (c) => {
     const results = await searchAmapPlaces(query.data.q, query.data.region, query.data.type);
     const persisted = await Promise.all(results.map(upsertAmapPlace));
     const ids = persisted.map((item) => item.id);
-    const evidence = ids.length === 0 ? [] : await db.select({ placeId: observations.placeId, grade: observations.evidenceGrade, expiresAt: observations.expiresAt }).from(observations).where(and(inArray(observations.placeId, ids), eq(observations.moderationStatus, 'accepted'), isNull(observations.withdrawnAt)));
+    const evidence = ids.length === 0 ? [] : await db.select({ placeId: observations.placeId, grade: observations.evidenceGrade, expiresAt: observations.expiresAt }).from(observations).where(and(inArray(observations.placeId, ids), eq(observations.moderationStatus, 'approved'), isNull(observations.withdrawnAt)));
     const evidenceByPlace = new Map<string, Array<{ grade: string; expiresAt: Date | null }>>();
     for (const item of evidence) evidenceByPlace.set(item.placeId, [...(evidenceByPlace.get(item.placeId) ?? []), { grade: item.grade, expiresAt: item.expiresAt }]);
     return ok(c, persisted.map((item) => ({
