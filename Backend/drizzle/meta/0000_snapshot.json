@@ -1,5 +1,5 @@
 {
-  "id": "c3e5634e-5845-4515-8f9a-194a0d626cc0",
+  "id": "09dd4f48-400c-476d-9668-11981a052c22",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
@@ -795,6 +795,21 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
+        },
+        "idx_community_review_tasks_place": {
+          "name": "idx_community_review_tasks_place",
+          "columns": [
+            {
+              "expression": "place_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {
@@ -1193,7 +1208,23 @@
           "default": "now()"
         }
       },
-      "indexes": {},
+      "indexes": {
+        "idx_facilities_place": {
+          "name": "idx_facilities_place",
+          "columns": [
+            {
+              "expression": "place_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
       "foreignKeys": {
         "facilities_place_id_places_id_fk": {
           "name": "facilities_place_id_places_id_fk",
@@ -1574,6 +1605,21 @@
             },
             {
               "expression": "expires_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "idx_location_proofs_place": {
+          "name": "idx_location_proofs_place",
+          "columns": [
+            {
+              "expression": "place_id",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -2273,7 +2319,23 @@
           "default": "now()"
         }
       },
-      "indexes": {},
+      "indexes": {
+        "idx_place_units_place": {
+          "name": "idx_place_units_place",
+          "columns": [
+            {
+              "expression": "place_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
       "foreignKeys": {
         "place_units_place_id_places_id_fk": {
           "name": "place_units_place_id_places_id_fk",
@@ -2361,8 +2423,27 @@
           "notNull": true,
           "default": "'360000'"
         },
+        "status": {
+          "name": "status",
+          "type": "varchar(16)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'active'"
+        },
+        "merged_into_place_id": {
+          "name": "merged_into_place_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
         "source_updated_at": {
           "name": "source_updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "admin_override_at": {
+          "name": "admin_override_at",
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
@@ -2418,13 +2499,76 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
+        },
+        "idx_places_status": {
+          "name": "idx_places_status",
+          "columns": [
+            {
+              "expression": "status",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "updated_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "idx_places_merged_target": {
+          "name": "idx_places_merged_target",
+          "columns": [
+            {
+              "expression": "merged_into_place_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
-      "foreignKeys": {},
+      "foreignKeys": {
+        "places_merged_into_place_id_fk": {
+          "name": "places_merged_into_place_id_fk",
+          "tableFrom": "places",
+          "tableTo": "places",
+          "columnsFrom": [
+            "merged_into_place_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "chk_places_status": {
+          "name": "chk_places_status",
+          "value": "\"places\".\"status\" IN ('active', 'disabled', 'merged')"
+        },
+        "chk_places_merge_target": {
+          "name": "chk_places_merge_target",
+          "value": "(\"places\".\"status\" = 'merged' AND \"places\".\"merged_into_place_id\" IS NOT NULL) OR (\"places\".\"status\" <> 'merged' AND \"places\".\"merged_into_place_id\" IS NULL)"
+        },
+        "chk_places_not_self_merged": {
+          "name": "chk_places_not_self_merged",
+          "value": "\"places\".\"merged_into_place_id\" IS NULL OR \"places\".\"merged_into_place_id\" <> \"places\".\"id\""
+        }
+      },
       "isRLSEnabled": false
     },
     "public.platform_link_configs": {
@@ -3455,6 +3599,21 @@
             },
             {
               "expression": "created_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "idx_verification_records_v2_place": {
+          "name": "idx_verification_records_v2_place",
+          "columns": [
+            {
+              "expression": "place_id",
               "isExpression": false,
               "asc": true,
               "nulls": "last"

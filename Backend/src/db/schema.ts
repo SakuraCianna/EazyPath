@@ -4,6 +4,7 @@ import {
   boolean,
   check,
   customType,
+  foreignKey,
   index,
   integer,
   jsonb,
@@ -226,32 +227,49 @@ export const places = pgTable(
     latitude: numeric('latitude', { precision: 10, scale: 7 }).notNull(),
     address: text('address'),
     provinceCode: varchar('province_code', { length: 12 }).default('360000').notNull(),
+    status: varchar('status', { length: 16 }).default('active').notNull(),
+    mergedIntoPlaceId: uuid('merged_into_place_id'),
     sourceUpdatedAt: timestamp('source_updated_at', { withTimezone: true }),
+    adminOverrideAt: timestamp('admin_override_at', { withTimezone: true }),
     ...timestamps,
   },
   (table) => [
     uniqueIndex('uq_places_external').on(table.externalSource, table.externalId),
     index('idx_places_category').on(table.categoryCode),
+    index('idx_places_status').on(table.status, table.updatedAt),
+    index('idx_places_merged_target').on(table.mergedIntoPlaceId),
+    foreignKey({ columns: [table.mergedIntoPlaceId], foreignColumns: [table.id], name: 'places_merged_into_place_id_fk' }).onDelete('restrict'),
+    check('chk_places_status', sql`${table.status} IN ('active', 'disabled', 'merged')`),
+    check('chk_places_merge_target', sql`(${table.status} = 'merged' AND ${table.mergedIntoPlaceId} IS NOT NULL) OR (${table.status} <> 'merged' AND ${table.mergedIntoPlaceId} IS NULL)`),
+    check('chk_places_not_self_merged', sql`${table.mergedIntoPlaceId} IS NULL OR ${table.mergedIntoPlaceId} <> ${table.id}`),
   ],
 );
 
-export const placeUnits = pgTable('place_units', {
-  id: uuid('id').primaryKey().defaultRandom(),
-  placeId: uuid('place_id').notNull().references(() => places.id, { onDelete: 'cascade' }),
-  parentUnitId: uuid('parent_unit_id'),
-  unitType: varchar('unit_type', { length: 64 }).notNull(),
-  name: varchar('name', { length: 160 }),
-  ...timestamps,
-});
+export const placeUnits = pgTable(
+  'place_units',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    placeId: uuid('place_id').notNull().references(() => places.id, { onDelete: 'cascade' }),
+    parentUnitId: uuid('parent_unit_id'),
+    unitType: varchar('unit_type', { length: 64 }).notNull(),
+    name: varchar('name', { length: 160 }),
+    ...timestamps,
+  },
+  (table) => [index('idx_place_units_place').on(table.placeId)],
+);
 
-export const facilities = pgTable('facilities', {
-  id: uuid('id').primaryKey().defaultRandom(),
-  placeId: uuid('place_id').notNull().references(() => places.id, { onDelete: 'cascade' }),
-  placeUnitId: uuid('place_unit_id').references(() => placeUnits.id, { onDelete: 'cascade' }),
-  facilityType: varchar('facility_type', { length: 64 }).notNull(),
-  name: varchar('name', { length: 160 }),
-  ...timestamps,
-});
+export const facilities = pgTable(
+  'facilities',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    placeId: uuid('place_id').notNull().references(() => places.id, { onDelete: 'cascade' }),
+    placeUnitId: uuid('place_unit_id').references(() => placeUnits.id, { onDelete: 'cascade' }),
+    facilityType: varchar('facility_type', { length: 64 }).notNull(),
+    name: varchar('name', { length: 160 }),
+    ...timestamps,
+  },
+  (table) => [index('idx_facilities_place').on(table.placeId)],
+);
 
 export const featureDefinitions = pgTable(
   'feature_definitions',
@@ -370,6 +388,7 @@ export const verificationRecords = pgTable(
   (table) => [
     index('idx_verification_records_v2_owner').on(table.installationId, table.createdAt),
     index('idx_verification_records_v2_admin_review').on(table.adminReviewStatus, table.createdAt),
+    index('idx_verification_records_v2_place').on(table.placeId),
     check('chk_verification_admin_review_status', sql`${table.adminReviewStatus} IN ('unreviewed', 'confirmed', 'flagged')`),
   ],
 );
@@ -390,7 +409,10 @@ export const communityReviewTasks = pgTable(
     closesAt: timestamp('closes_at', { withTimezone: true }),
     ...timestamps,
   },
-  (table) => [index('idx_community_review_tasks_status').on(table.status, table.createdAt)],
+  (table) => [
+    index('idx_community_review_tasks_status').on(table.status, table.createdAt),
+    index('idx_community_review_tasks_place').on(table.placeId),
+  ],
 );
 
 export const communityReviewVotes = pgTable(
@@ -426,7 +448,10 @@ export const locationProofs = pgTable(
     consumedAt: timestamp('consumed_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
   },
-  (table) => [index('idx_location_proofs_owner_expiry').on(table.installationId, table.expiresAt)],
+  (table) => [
+    index('idx_location_proofs_owner_expiry').on(table.installationId, table.expiresAt),
+    index('idx_location_proofs_place').on(table.placeId),
+  ],
 );
 
 export const mediaUploadSessions = pgTable(

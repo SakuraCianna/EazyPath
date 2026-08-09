@@ -22,6 +22,7 @@ import {
 import { fail, ok } from '../lib/api-response.js';
 import { requireUser } from '../middleware/auth.js';
 import { isFeatureValueCompatible } from '../domain/feature-values.js';
+import { lockCanonicalPlace, resolveActivePlace } from '../services/place-resolution.js';
 import type { AppBindings } from '../types.js';
 
 const observationSchema = z.object({
@@ -74,14 +75,14 @@ observationsRouter.post('/', async (c) => {
   if (!parsed.success) return fail(c, 422, 'OBSERVATION_INVALID', '现场观测参数无效');
   const input = parsed.data;
   if (input.place_unit_id && input.facility_id) return fail(c, 422, 'OBSERVATION_TARGET_INVALID', '地点单元和设施不能同时指定');
-  const [place] = await db.select({ id: places.id }).from(places).where(eq(places.id, input.place_id)).limit(1);
+  const place = await resolveActivePlace(input.place_id);
   if (!place) return fail(c, 404, 'PLACE_NOT_FOUND', '地点不存在');
   if (input.place_unit_id) {
-    const [unit] = await db.select({ id: placeUnits.id }).from(placeUnits).where(and(eq(placeUnits.id, input.place_unit_id), eq(placeUnits.placeId, input.place_id))).limit(1);
+    const [unit] = await db.select({ id: placeUnits.id }).from(placeUnits).where(and(eq(placeUnits.id, input.place_unit_id), eq(placeUnits.placeId, place.id))).limit(1);
     if (!unit) return fail(c, 422, 'OBSERVATION_TARGET_INVALID', '地点单元不属于所选地点');
   }
   if (input.facility_id) {
-    const [facility] = await db.select({ id: facilities.id }).from(facilities).where(and(eq(facilities.id, input.facility_id), eq(facilities.placeId, input.place_id))).limit(1);
+    const [facility] = await db.select({ id: facilities.id }).from(facilities).where(and(eq(facilities.id, input.facility_id), eq(facilities.placeId, place.id))).limit(1);
     if (!facility) return fail(c, 422, 'OBSERVATION_TARGET_INVALID', '设施不属于所选地点');
   }
   const [feature] = await db.select().from(featureDefinitions).where(and(eq(featureDefinitions.featureKey, input.feature_key), eq(featureDefinitions.active, true))).limit(1);
@@ -92,7 +93,7 @@ observationsRouter.post('/', async (c) => {
   const proof = input.location_proof_id ? (await db.select().from(locationProofs).where(and(
     eq(locationProofs.id, input.location_proof_id),
     eq(locationProofs.installationId, c.get('installationId')),
-    eq(locationProofs.placeId, input.place_id),
+    eq(locationProofs.placeId, place.id),
     gt(locationProofs.expiresAt, new Date()),
     isNull(locationProofs.consumedAt),
   )).limit(1))[0] : undefined;
@@ -106,6 +107,8 @@ observationsRouter.post('/', async (c) => {
         .for('update')
         .limit(1);
       if (account?.status !== 'active') throw new CommunityConflictError('ACCOUNT_NOT_ACTIVE');
+      const lockedPlace = await lockCanonicalPlace(tx, place.id);
+      if (!lockedPlace) throw new CommunityConflictError('PLACE_NOT_ACTIVE');
       const claimedProof = proof ? (await tx.update(locationProofs).set({ consumedAt: new Date() }).where(and(
         eq(locationProofs.id, proof.id),
         gt(locationProofs.expiresAt, new Date()),
@@ -129,7 +132,7 @@ observationsRouter.post('/', async (c) => {
       if (claimedMediaIds.length !== input.media_ids.length) throw new CommunityConflictError('MEDIA_ALREADY_LINKED');
       const [observation] = await tx.insert(observations).values({
         installationId: c.get('installationId'),
-        placeId: input.place_id,
+        placeId: lockedPlace.id,
         placeUnitId: input.place_unit_id,
         facilityId: input.facility_id,
         featureDefinitionId: feature.id,
@@ -159,6 +162,9 @@ observationsRouter.post('/', async (c) => {
     }
     if (error instanceof CommunityConflictError && error.code === 'ACCOUNT_NOT_ACTIVE') {
       return fail(c, 409, error.code, '匿名账户正在删除或已停用，无法继续提交');
+    }
+    if (error instanceof CommunityConflictError && error.code === 'PLACE_NOT_ACTIVE') {
+      return fail(c, 409, error.code, '地点状态刚刚发生变化，请刷新地点后重新提交');
     }
     throw error;
   }
@@ -447,15 +453,21 @@ observationsRouter.post('/:id/supplements', async (c) => {
 locationProofsRouter.post('/verify', async (c) => {
   const parsed = proofSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return fail(c, 422, 'LOCATION_PROOF_INVALID', '位置证明参数无效');
-  const [place] = await db.select({ id: places.id, latitude: places.latitude, longitude: places.longitude }).from(places).where(eq(places.id, parsed.data.place_id)).limit(1);
-  if (!place) return fail(c, 404, 'PLACE_NOT_FOUND', '地点不存在');
-  const distance = haversineMeters(parsed.data.latitude, parsed.data.longitude, Number(place.latitude), Number(place.longitude));
-  const effectiveDistance = distance + parsed.data.accuracy_meters;
-  const passed = effectiveDistance <= 200;
-  const bucket = effectiveDistance <= 50 ? 'within_50m' : effectiveDistance <= 200 ? 'within_200m' : effectiveDistance <= 1000 ? 'within_1km' : 'over_1km';
-  const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
-  const [proof] = await db.insert(locationProofs).values({ installationId: c.get('installationId'), placeId: place.id, passed, distanceBucket: bucket, expiresAt }).returning();
-  return ok(c, { proof_id: proof?.id, passed, distance_bucket: bucket, expires_at: expiresAt, privacy_notice: '精确坐标未保存，仅保留通过结果和粗粒度距离区间。' });
+  const candidate = await resolveActivePlace(parsed.data.place_id);
+  if (!candidate) return fail(c, 404, 'PLACE_NOT_FOUND', '地点不存在或已停用');
+  const result = await db.transaction(async (tx) => {
+    const place = await lockCanonicalPlace(tx, candidate.id);
+    if (!place) return undefined;
+    const distance = haversineMeters(parsed.data.latitude, parsed.data.longitude, Number(place.latitude), Number(place.longitude));
+    const effectiveDistance = distance + parsed.data.accuracy_meters;
+    const passed = effectiveDistance <= 200;
+    const bucket = effectiveDistance <= 50 ? 'within_50m' : effectiveDistance <= 200 ? 'within_200m' : effectiveDistance <= 1000 ? 'within_1km' : 'over_1km';
+    const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
+    const [proof] = await tx.insert(locationProofs).values({ installationId: c.get('installationId'), placeId: place.id, passed, distanceBucket: bucket, expiresAt }).returning();
+    return { proof, place, passed, bucket, expiresAt };
+  });
+  if (!result) return fail(c, 409, 'PLACE_STATE_CHANGED', '地点状态刚刚发生变化，请刷新地点后重新验证位置');
+  return ok(c, { proof_id: result.proof?.id, canonical_place_id: result.place.id, passed: result.passed, distance_bucket: result.bucket, expires_at: result.expiresAt, privacy_notice: '精确坐标未保存，仅保留通过结果和粗粒度距离区间。' });
 });
 
 reviewTasksRouter.get('/', async (c) => {
@@ -567,7 +579,7 @@ function isUniqueViolation(error: unknown): boolean {
 }
 
 class CommunityConflictError extends Error {
-  constructor(readonly code: 'LOCATION_PROOF_ALREADY_USED' | 'MEDIA_ALREADY_LINKED' | 'APPEAL_MEDIA_UNAVAILABLE' | 'ACCOUNT_NOT_ACTIVE') {
+  constructor(readonly code: 'LOCATION_PROOF_ALREADY_USED' | 'MEDIA_ALREADY_LINKED' | 'APPEAL_MEDIA_UNAVAILABLE' | 'ACCOUNT_NOT_ACTIVE' | 'PLACE_NOT_ACTIVE') {
     super(code);
   }
 }

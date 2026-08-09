@@ -37,6 +37,13 @@ export async function saveTemporaryVerificationImage(file: File): Promise<string
   return target;
 }
 
+export async function removeTemporaryVerificationImage(storagePath: string): Promise<void> {
+  const root = path.resolve(getEnv().MEDIA_TEMP_DIR);
+  const target = path.resolve(storagePath);
+  if (path.dirname(target) !== root) throw new Error('INVALID_TEMPORARY_MEDIA_PATH');
+  await rm(target, { force: true });
+}
+
 export function uploadDirectory(uploadId: string): string {
   const root = path.resolve(getEnv().MEDIA_UPLOAD_STAGING_DIR);
   const target = path.resolve(root, uploadId);

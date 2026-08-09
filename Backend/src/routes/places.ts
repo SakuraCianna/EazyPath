@@ -13,6 +13,7 @@ import {
 import { fail, ok } from '../lib/api-response.js';
 import { requireUser } from '../middleware/auth.js';
 import { AmapUpstreamError, searchAmapPlaces, type AmapPlace } from '../services/amap.js';
+import { lockCanonicalPlaceForRead, resolveActivePlace } from '../services/place-resolution.js';
 import type { AppBindings } from '../types.js';
 
 export const placesRouter = new Hono<AppBindings>();
@@ -39,7 +40,8 @@ placesRouter.get('/search', async (c) => {
   if (!query.success) return fail(c, 422, 'PLACE_SEARCH_INVALID', '地点搜索参数无效');
   try {
     const results = await searchAmapPlaces(query.data.q, query.data.region, query.data.type);
-    const persisted = await Promise.all(results.map(upsertAmapPlace));
+    const persistedRows = await Promise.all(results.map(upsertAmapPlace));
+    const persisted = [...new Map(persistedRows.filter((item) => item !== null).map((item) => [item.id, item])).values()];
     const ids = persisted.map((item) => item.id);
     const evidence = ids.length === 0 ? [] : await db.select({ placeId: observations.placeId, grade: observations.evidenceGrade, expiresAt: observations.expiresAt }).from(observations).where(and(inArray(observations.placeId, ids), eq(observations.moderationStatus, 'approved'), isNull(observations.withdrawnAt)));
     const evidenceByPlace = new Map<string, Array<{ grade: string; expiresAt: Date | null }>>();
@@ -55,12 +57,24 @@ placesRouter.get('/search', async (c) => {
 });
 
 placesRouter.get('/:placeId', async (c) => {
-  const [place] = await db.select().from(places).where(eq(places.id, c.req.param('placeId'))).limit(1);
-  if (!place) return fail(c, 404, 'PLACE_NOT_FOUND', '地点不存在');
-  const [units, facilityRows, evidenceRows] = await Promise.all([
-    db.select().from(placeUnits).where(eq(placeUnits.placeId, place.id)),
-    db.select().from(facilities).where(eq(facilities.placeId, place.id)),
-    db.select({
+  const requestedPlaceId = c.req.param('placeId');
+  if (!z.uuid().safeParse(requestedPlaceId).success) return fail(c, 422, 'PLACE_ID_INVALID', '地点 ID 无效');
+  const candidate = await resolveActivePlace(requestedPlaceId);
+  if (!candidate) {
+    const [exists] = await db.select({ id: places.id }).from(places).where(eq(places.id, requestedPlaceId)).limit(1);
+    return exists
+      ? fail(c, 410, 'PLACE_UNAVAILABLE', '地点已停用或 canonical 记录不可用')
+      : fail(c, 404, 'PLACE_NOT_FOUND', '地点不存在');
+  }
+  const result = await db.transaction(async (tx) => {
+    const lockedPlace = await lockCanonicalPlaceForRead(tx, candidate.id);
+    if (!lockedPlace) return undefined;
+    const [place] = await tx.select().from(places).where(eq(places.id, lockedPlace.id)).limit(1);
+    if (!place) return undefined;
+    const [units, facilityRows, evidenceRows] = await Promise.all([
+      tx.select().from(placeUnits).where(eq(placeUnits.placeId, place.id)),
+      tx.select().from(facilities).where(eq(facilities.placeId, place.id)),
+      tx.select({
       id: observations.id,
       feature_key: featureDefinitions.featureKey,
       display_name: featureDefinitions.displayName,
@@ -72,9 +86,24 @@ placesRouter.get('/:placeId', async (c) => {
       observed_at: observations.observedAt,
       expires_at: observations.expiresAt,
       created_at: observations.createdAt,
-    }).from(observations).innerJoin(featureDefinitions, eq(observations.featureDefinitionId, featureDefinitions.id)).where(and(eq(observations.placeId, place.id), isNull(observations.withdrawnAt))).orderBy(desc(observations.createdAt)),
-  ]);
-  return ok(c, { place, units, facilities: facilityRows, evidence_timeline: evidenceRows });
+      }).from(observations).innerJoin(featureDefinitions, eq(observations.featureDefinitionId, featureDefinitions.id)).where(and(
+        eq(observations.placeId, place.id),
+        eq(observations.moderationStatus, 'approved'),
+        isNull(observations.withdrawnAt),
+      )).orderBy(desc(observations.createdAt)).limit(201),
+    ]);
+    return { place, units, facilityRows, evidenceRows: evidenceRows.slice(0, 200), evidenceTimelineHasMore: evidenceRows.length > 200 };
+  });
+  if (!result) return fail(c, 409, 'PLACE_STATE_CHANGED', '地点状态刚刚发生变化，请刷新后重试');
+  return ok(c, {
+    place: result.place,
+    canonical_place_id: result.place.id,
+    requested_place_id: requestedPlaceId,
+    units: result.units,
+    facilities: result.facilityRows,
+    evidence_timeline: result.evidenceRows,
+    evidence_timeline_has_more: result.evidenceTimelineHasMore,
+  });
 });
 
 async function upsertAmapPlace(place: AmapPlace) {
@@ -86,6 +115,8 @@ async function upsertAmapPlace(place: AmapPlace) {
     latitude: string;
     address: string | null;
     external_id: string;
+    status: string;
+    merged_into_place_id: string | null;
   }>>`
     INSERT INTO places (
       external_source, external_id, name, category_code, location,
@@ -96,18 +127,40 @@ async function upsertAmapPlace(place: AmapPlace) {
       ${place.longitude}, ${place.latitude}, ${place.address}, '360000', NOW(), NOW()
     )
     ON CONFLICT (external_source, external_id) DO UPDATE SET
-      name = EXCLUDED.name,
-      category_code = EXCLUDED.category_code,
-      location = EXCLUDED.location,
-      longitude = EXCLUDED.longitude,
-      latitude = EXCLUDED.latitude,
-      address = EXCLUDED.address,
+      name = CASE WHEN places.admin_override_at IS NULL THEN EXCLUDED.name ELSE places.name END,
+      category_code = CASE WHEN places.admin_override_at IS NULL THEN EXCLUDED.category_code ELSE places.category_code END,
+      location = CASE WHEN places.admin_override_at IS NULL THEN EXCLUDED.location ELSE places.location END,
+      longitude = CASE WHEN places.admin_override_at IS NULL THEN EXCLUDED.longitude ELSE places.longitude END,
+      latitude = CASE WHEN places.admin_override_at IS NULL THEN EXCLUDED.latitude ELSE places.latitude END,
+      address = CASE WHEN places.admin_override_at IS NULL THEN EXCLUDED.address ELSE places.address END,
       source_updated_at = NOW(),
-      updated_at = NOW()
-    RETURNING id, name, category_code, longitude, latitude, address, external_id
+      updated_at = CASE WHEN places.admin_override_at IS NULL THEN NOW() ELSE places.updated_at END
+    RETURNING id, name, category_code, longitude, latitude, address, external_id, status, merged_into_place_id
   `;
   const row = rows[0];
   if (!row) throw new Error('PLACE_UPSERT_FAILED');
+  if (row.status === 'disabled') return null;
+  if (row.status === 'merged' && row.merged_into_place_id) {
+    const canonicalRows = await queryClient<Array<{
+      id: string; name: string; category_code: string; longitude: string; latitude: string; address: string | null;
+      external_source: string | null; external_id: string | null;
+    }>>`
+      SELECT id, name, category_code, longitude, latitude, address, external_source, external_id
+      FROM places WHERE id = ${row.merged_into_place_id} AND status = 'active' LIMIT 1
+    `;
+    const canonical = canonicalRows[0];
+    if (!canonical) return null;
+    return {
+      id: canonical.id,
+      external_source: canonical.external_source,
+      external_id: canonical.external_id,
+      name: canonical.name,
+      category_code: canonical.category_code,
+      longitude: Number(canonical.longitude),
+      latitude: Number(canonical.latitude),
+      address: canonical.address,
+    };
+  }
   return {
     id: row.id,
     external_source: 'amap',
