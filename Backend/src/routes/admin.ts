@@ -17,7 +17,6 @@ import {
   observations,
   places,
   platformLinkConfigs,
-  queryClient,
 } from '../db/index.js';
 import { ADMIN_PERMISSION_CODES } from '../domain/admin-security.js';
 import { fail, ok } from '../lib/api-response.js';
@@ -32,14 +31,8 @@ import {
 } from '../services/admin-access.js';
 import type { AppBindings } from '../types.js';
 import { adminReviewsRouter } from './admin-reviews.js';
+import { adminPlacesRouter } from './admin-places.js';
 
-const placeSchema = z.object({
-  name: z.string().min(1).max(160),
-  category_code: z.string().min(1).max(64),
-  longitude: z.number().min(-180).max(180),
-  latitude: z.number().min(-90).max(90),
-  address: z.string().max(1000).optional(),
-});
 const platformSchema = z.object({
   platform: z.string().min(1).max(32),
   capability: z.string().min(1).max(64),
@@ -74,6 +67,7 @@ export const adminRouter = new Hono<AppBindings>();
 adminRouter.use('*', requireAdmin);
 adminRouter.use('*', requireAdminCsrf);
 adminRouter.route('/reviews', adminReviewsRouter);
+adminRouter.route('/places', adminPlacesRouter);
 
 adminRouter.get('/dashboard', requireAdminPermission('dashboard.read'), async (c) => {
   const now = new Date();
@@ -101,42 +95,6 @@ adminRouter.get('/dashboard', requireAdminPermission('dashboard.read'), async (c
       { id: 'redis_bullmq', label: 'Redis / BullMQ', configured: true },
     ],
   });
-});
-
-adminRouter.get('/places', requireAdminPermission('places.read'), async (c) => ok(c, await db.select().from(places).orderBy(desc(places.updatedAt)).limit(100)));
-adminRouter.post('/places', requireAdminPermission('places.write'), async (c) => {
-  const parsed = placeSchema.safeParse(await c.req.json().catch(() => null));
-  if (!parsed.success) return fail(c, 422, 'PLACE_INVALID', '地点参数无效');
-  const rows = await queryClient<Array<{ id: string }>>`
-    INSERT INTO places (name, category_code, location, longitude, latitude, address, province_code)
-    VALUES (${parsed.data.name}, ${parsed.data.category_code}, ST_SetSRID(ST_MakePoint(${parsed.data.longitude}, ${parsed.data.latitude}), 4326), ${parsed.data.longitude}, ${parsed.data.latitude}, ${parsed.data.address ?? null}, '360000')
-    RETURNING id
-  `;
-  const id = rows[0]?.id;
-  if (!id) return fail(c, 500, 'PLACE_CREATE_FAILED', '地点创建失败');
-  await audit(c, c.get('adminUserId'), 'place.created', 'place', id);
-  return ok(c, { id }, '地点已创建', 201);
-});
-
-adminRouter.patch('/places/:id', requireAdminPermission('places.write'), async (c) => {
-  const parsed = placeSchema.partial().safeParse(await c.req.json().catch(() => null));
-  if (!parsed.success) return fail(c, 422, 'PLACE_INVALID', '地点参数无效');
-  const update = parsed.data;
-  const [existing] = await db.select().from(places).where(eq(places.id, c.req.param('id'))).limit(1);
-  if (!existing) return fail(c, 404, 'PLACE_NOT_FOUND', '地点不存在');
-  const longitude = update.longitude ?? Number(existing.longitude);
-  const latitude = update.latitude ?? Number(existing.latitude);
-  await queryClient`
-    UPDATE places SET
-      name = ${update.name ?? existing.name},
-      category_code = ${update.category_code ?? existing.categoryCode},
-      longitude = ${longitude}, latitude = ${latitude},
-      location = ST_SetSRID(ST_MakePoint(${longitude}, ${latitude}), 4326),
-      address = ${update.address ?? existing.address}, updated_at = NOW()
-    WHERE id = ${existing.id}
-  `;
-  await audit(c, c.get('adminUserId'), 'place.updated', 'place', existing.id);
-  return ok(c, { id: existing.id });
 });
 
 adminRouter.get('/platform-links', requireAdminPermission('platform_links.read'), async (c) => ok(c, await db.select().from(platformLinkConfigs).orderBy(platformLinkConfigs.platform)));

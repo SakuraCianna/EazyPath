@@ -266,7 +266,10 @@ CREATE TABLE "places" (
 	"latitude" numeric(10, 7) NOT NULL,
 	"address" text,
 	"province_code" varchar(12) DEFAULT '360000' NOT NULL,
+	"status" varchar(16) DEFAULT 'active' NOT NULL,
+	"merged_into_place_id" uuid,
 	"source_updated_at" timestamp with time zone,
+	"admin_override_at" timestamp with time zone,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
 );
@@ -379,6 +382,7 @@ ALTER TABLE "observations" ADD CONSTRAINT "observations_place_unit_id_place_unit
 ALTER TABLE "observations" ADD CONSTRAINT "observations_facility_id_facilities_id_fk" FOREIGN KEY ("facility_id") REFERENCES "public"."facilities"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "observations" ADD CONSTRAINT "observations_feature_definition_id_feature_definitions_id_fk" FOREIGN KEY ("feature_definition_id") REFERENCES "public"."feature_definitions"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "place_units" ADD CONSTRAINT "place_units_place_id_places_id_fk" FOREIGN KEY ("place_id") REFERENCES "public"."places"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "places" ADD CONSTRAINT "places_merged_into_place_id_fk" FOREIGN KEY ("merged_into_place_id") REFERENCES "public"."places"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "refresh_sessions" ADD CONSTRAINT "refresh_sessions_installation_id_installation_accounts_id_fk" FOREIGN KEY ("installation_id") REFERENCES "public"."installation_accounts"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "service_cards_v2" ADD CONSTRAINT "service_cards_v2_task_id_agent_tasks_id_fk" FOREIGN KEY ("task_id") REFERENCES "public"."agent_tasks"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "service_cards_v2" ADD CONSTRAINT "service_cards_v2_subtask_id_agent_subtasks_id_fk" FOREIGN KEY ("subtask_id") REFERENCES "public"."agent_subtasks"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
@@ -395,17 +399,23 @@ CREATE INDEX "idx_agent_tasks_installation_status" ON "agent_tasks" USING btree 
 CREATE UNIQUE INDEX "uq_agent_tasks_idempotency" ON "agent_tasks" USING btree ("installation_id","idempotency_key");--> statement-breakpoint
 CREATE INDEX "idx_audit_events_time_action" ON "audit_events" USING btree ("created_at","action");--> statement-breakpoint
 CREATE INDEX "idx_community_review_tasks_status" ON "community_review_tasks" USING btree ("status","created_at");--> statement-breakpoint
+CREATE INDEX "idx_community_review_tasks_place" ON "community_review_tasks" USING btree ("place_id");--> statement-breakpoint
 CREATE UNIQUE INDEX "uq_community_review_votes_round_installation" ON "community_review_votes" USING btree ("review_task_id","installation_id");--> statement-breakpoint
 CREATE INDEX "idx_evidence_media_owner_status" ON "evidence_media" USING btree ("installation_id","status","expires_at");--> statement-breakpoint
+CREATE INDEX "idx_facilities_place" ON "facilities" USING btree ("place_id");--> statement-breakpoint
 CREATE UNIQUE INDEX "uq_feature_definitions_key" ON "feature_definitions" USING btree ("feature_key");--> statement-breakpoint
 CREATE UNIQUE INDEX "uq_installation_accounts_guid" ON "installation_accounts" USING btree ("installation_guid");--> statement-breakpoint
 CREATE INDEX "idx_installation_challenges_guid" ON "installation_challenges" USING btree ("installation_guid","expires_at");--> statement-breakpoint
 CREATE INDEX "idx_location_proofs_owner_expiry" ON "location_proofs" USING btree ("installation_id","expires_at");--> statement-breakpoint
+CREATE INDEX "idx_location_proofs_place" ON "location_proofs" USING btree ("place_id");--> statement-breakpoint
 CREATE UNIQUE INDEX "uq_media_upload_sessions_idempotency" ON "media_upload_sessions" USING btree ("installation_id","idempotency_key");--> statement-breakpoint
 CREATE INDEX "idx_media_upload_sessions_expiry" ON "media_upload_sessions" USING btree ("status","expires_at");--> statement-breakpoint
 CREATE INDEX "idx_observations_place_feature" ON "observations" USING btree ("place_id","feature_definition_id","moderation_status","freshness_status","expires_at");--> statement-breakpoint
+CREATE INDEX "idx_place_units_place" ON "place_units" USING btree ("place_id");--> statement-breakpoint
 CREATE UNIQUE INDEX "uq_places_external" ON "places" USING btree ("external_source","external_id");--> statement-breakpoint
 CREATE INDEX "idx_places_category" ON "places" USING btree ("category_code");--> statement-breakpoint
+CREATE INDEX "idx_places_status" ON "places" USING btree ("status","updated_at");--> statement-breakpoint
+CREATE INDEX "idx_places_merged_target" ON "places" USING btree ("merged_into_place_id");--> statement-breakpoint
 CREATE UNIQUE INDEX "uq_platform_link_configs_capability" ON "platform_link_configs" USING btree ("platform","capability");--> statement-breakpoint
 CREATE UNIQUE INDEX "uq_refresh_sessions_token_hash" ON "refresh_sessions" USING btree ("token_hash");--> statement-breakpoint
 CREATE INDEX "idx_refresh_sessions_installation" ON "refresh_sessions" USING btree ("installation_id","expires_at");--> statement-breakpoint
@@ -476,5 +486,10 @@ CREATE INDEX "idx_user_feedback_expiry" ON "user_feedback" USING btree ("feedbac
 CREATE UNIQUE INDEX "uq_user_feedback_active" ON "user_feedback" USING btree ("installation_id","feedback_type","target_type","target_id") WHERE "user_feedback"."status" IN ('open', 'in_review');--> statement-breakpoint
 CREATE INDEX "idx_observations_moderation_queue" ON "observations" USING btree ("moderation_status","updated_at");--> statement-breakpoint
 CREATE INDEX "idx_verification_records_v2_admin_review" ON "verification_records_v2" USING btree ("admin_review_status","created_at");--> statement-breakpoint
+CREATE INDEX "idx_verification_records_v2_place" ON "verification_records_v2" USING btree ("place_id");--> statement-breakpoint
 ALTER TABLE "observations" ADD CONSTRAINT "chk_observation_moderation_status" CHECK ("observations"."moderation_status" IN ('pending', 'approved', 'rejected', 'withdrawn'));--> statement-breakpoint
 ALTER TABLE "verification_records_v2" ADD CONSTRAINT "chk_verification_admin_review_status" CHECK ("verification_records_v2"."admin_review_status" IN ('unreviewed', 'confirmed', 'flagged'));
+--> statement-breakpoint
+ALTER TABLE "places" ADD CONSTRAINT "chk_places_status" CHECK ("places"."status" IN ('active', 'disabled', 'merged'));--> statement-breakpoint
+ALTER TABLE "places" ADD CONSTRAINT "chk_places_merge_target" CHECK (("places"."status" = 'merged' AND "places"."merged_into_place_id" IS NOT NULL) OR ("places"."status" <> 'merged' AND "places"."merged_into_place_id" IS NULL));--> statement-breakpoint
+ALTER TABLE "places" ADD CONSTRAINT "chk_places_not_self_merged" CHECK ("places"."merged_into_place_id" IS NULL OR "places"."merged_into_place_id" <> "places"."id");
