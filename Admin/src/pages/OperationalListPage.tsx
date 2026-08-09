@@ -6,13 +6,12 @@ import { useApiData } from '../hooks/useApiData';
 import { useModalDialog } from '../hooks/useModalDialog';
 import styles from './DataPage.module.css';
 
-type PageKind = 'community' | 'users' | 'tasks' | 'media' | 'audit';
+type PageKind = 'users' | 'tasks' | 'media' | 'audit';
 type Row = Record<string, unknown>;
 interface Column { label: string; key: string; type?: 'date' | 'status' | 'bytes' }
 interface PageConfig { eyebrow: string; title: string; description: string; endpoint: string; columns: Column[] }
 
 const configs: Record<PageKind, PageConfig> = {
-  community: { eyebrow: '社区证据治理', title: '社区复核', description: '查看过期、冲突与高频地点复核轮次，以及版本化共识快照。', endpoint: '/api/v1/admin/community-reviews', columns: [{ label: '地点', key: 'placeName' }, { label: '字段', key: 'featureKey' }, { label: '原因', key: 'reason' }, { label: '状态', key: 'status', type: 'status' }, { label: '结论', key: 'consensusOutcome' }, { label: '现场半径', key: 'locationRadiusMeters' }, { label: '更新时间', key: 'updatedAt', type: 'date' }] },
   users: { eyebrow: '匿名安装账户', title: '用户', description: 'P0 仅管理 App 生成 GUID 的匿名安装账户，不读取硬件设备号或强制手机号。', endpoint: '/api/v1/admin/installations', columns: [{ label: '安装账户 ID', key: 'id' }, { label: '安装 GUID', key: 'installationGuid' }, { label: '状态', key: 'status', type: 'status' }, { label: '通过贡献', key: 'acceptedContributionCount' }, { label: '最近活动', key: 'lastSeenAt', type: 'date' }, { label: '创建时间', key: 'createdAt', type: 'date' }] },
   tasks: { eyebrow: 'Agent 编排', title: 'Agent 任务', description: 'PostgreSQL 是任务事实来源，BullMQ 负责执行与重试。', endpoint: '/api/v1/admin/tasks', columns: [{ label: '任务 ID', key: 'id' }, { label: '输入类型', key: 'inputType' }, { label: '状态', key: 'status', type: 'status' }, { label: '失败码', key: 'failureCode' }, { label: '时区', key: 'clientTimezone' }, { label: '创建时间', key: 'createdAt', type: 'date' }, { label: '完成时间', key: 'completedAt', type: 'date' }] },
   media: { eyebrow: '本地受保护存储', title: '本地媒体', description: '仅显示已确认脱敏的社区证据元数据；文件目录不直接暴露给浏览器。', endpoint: '/api/v1/admin/media', columns: [{ label: '媒体 ID', key: 'id' }, { label: '类型', key: 'mimeType' }, { label: '大小', key: 'byteSize', type: 'bytes' }, { label: '状态', key: 'status', type: 'status' }, { label: '已确认脱敏', key: 'redactionConfirmed' }, { label: '关联时间', key: 'linkedAt', type: 'date' }, { label: '过期时间', key: 'expiresAt', type: 'date' }] },

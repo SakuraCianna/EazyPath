@@ -407,11 +407,18 @@ export const communityReviewTasks = pgTable(
     consensusSnapshot: jsonb('consensus_snapshot'),
     locationRadiusMeters: integer('location_radius_meters').default(200).notNull(),
     closesAt: timestamp('closes_at', { withTimezone: true }),
+    resolutionReason: text('resolution_reason'),
+    resolvedByAdminId: uuid('resolved_by_admin_id').references(() => adminUsers.id, { onDelete: 'set null' }),
+    resolvedAt: timestamp('resolved_at', { withTimezone: true }),
+    supersededByTaskId: uuid('superseded_by_task_id'),
     ...timestamps,
   },
   (table) => [
     index('idx_community_review_tasks_status').on(table.status, table.createdAt),
     index('idx_community_review_tasks_place').on(table.placeId),
+    index('idx_community_review_tasks_admin_queue').on(table.status, table.updatedAt, table.id),
+    foreignKey({ columns: [table.supersededByTaskId], foreignColumns: [table.id], name: 'community_review_tasks_superseded_by_fk' }).onDelete('set null'),
+    check('chk_community_review_task_status', sql`${table.status} IN ('pending_review', 'community_consensus', 'conflicting', 'admin_rejected', 'cancelled', 'reopened')`),
   ],
 );
 
@@ -427,6 +434,7 @@ export const communityReviewVotes = pgTable(
     locationDistanceBucket: varchar('location_distance_bucket', { length: 24 }),
     baseWeight: numeric('base_weight', { precision: 3, scale: 2 }).notNull(),
     finalWeight: numeric('final_weight', { precision: 3, scale: 2 }).notNull(),
+    established: boolean('established').default(false).notNull(),
     suspended: boolean('suspended').default(false).notNull(),
     ...timestamps,
   },

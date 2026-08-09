@@ -93,8 +93,13 @@ CREATE TABLE "community_review_tasks" (
 	"consensus_snapshot" jsonb,
 	"location_radius_meters" integer DEFAULT 200 NOT NULL,
 	"closes_at" timestamp with time zone,
+	"resolution_reason" text,
+	"resolved_by_admin_id" uuid,
+	"resolved_at" timestamp with time zone,
+	"superseded_by_task_id" uuid,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
+	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
+	CONSTRAINT "chk_community_review_task_status" CHECK ("community_review_tasks"."status" IN ('pending_review', 'community_consensus', 'conflicting', 'admin_rejected', 'cancelled', 'reopened'))
 );
 --> statement-breakpoint
 CREATE TABLE "community_review_votes" (
@@ -107,6 +112,7 @@ CREATE TABLE "community_review_votes" (
 	"location_distance_bucket" varchar(24),
 	"base_weight" numeric(3, 2) NOT NULL,
 	"final_weight" numeric(3, 2) NOT NULL,
+	"established" boolean DEFAULT false NOT NULL,
 	"suspended" boolean DEFAULT false NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
@@ -363,6 +369,8 @@ ALTER TABLE "agent_subtasks" ADD CONSTRAINT "agent_subtasks_task_id_agent_tasks_
 ALTER TABLE "agent_tasks" ADD CONSTRAINT "agent_tasks_installation_id_installation_accounts_id_fk" FOREIGN KEY ("installation_id") REFERENCES "public"."installation_accounts"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "community_review_tasks" ADD CONSTRAINT "community_review_tasks_place_id_places_id_fk" FOREIGN KEY ("place_id") REFERENCES "public"."places"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "community_review_tasks" ADD CONSTRAINT "community_review_tasks_feature_definition_id_feature_definitions_id_fk" FOREIGN KEY ("feature_definition_id") REFERENCES "public"."feature_definitions"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "community_review_tasks" ADD CONSTRAINT "community_review_tasks_resolved_by_admin_id_admin_users_id_fk" FOREIGN KEY ("resolved_by_admin_id") REFERENCES "public"."admin_users"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "community_review_tasks" ADD CONSTRAINT "community_review_tasks_superseded_by_fk" FOREIGN KEY ("superseded_by_task_id") REFERENCES "public"."community_review_tasks"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "community_review_votes" ADD CONSTRAINT "community_review_votes_review_task_id_community_review_tasks_id_fk" FOREIGN KEY ("review_task_id") REFERENCES "public"."community_review_tasks"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "community_review_votes" ADD CONSTRAINT "community_review_votes_installation_id_installation_accounts_id_fk" FOREIGN KEY ("installation_id") REFERENCES "public"."installation_accounts"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "community_review_votes" ADD CONSTRAINT "community_review_votes_media_id_evidence_media_id_fk" FOREIGN KEY ("media_id") REFERENCES "public"."evidence_media"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
@@ -400,6 +408,7 @@ CREATE UNIQUE INDEX "uq_agent_tasks_idempotency" ON "agent_tasks" USING btree ("
 CREATE INDEX "idx_audit_events_time_action" ON "audit_events" USING btree ("created_at","action");--> statement-breakpoint
 CREATE INDEX "idx_community_review_tasks_status" ON "community_review_tasks" USING btree ("status","created_at");--> statement-breakpoint
 CREATE INDEX "idx_community_review_tasks_place" ON "community_review_tasks" USING btree ("place_id");--> statement-breakpoint
+CREATE INDEX "idx_community_review_tasks_admin_queue" ON "community_review_tasks" USING btree ("status","updated_at","id");--> statement-breakpoint
 CREATE UNIQUE INDEX "uq_community_review_votes_round_installation" ON "community_review_votes" USING btree ("review_task_id","installation_id");--> statement-breakpoint
 CREATE INDEX "idx_evidence_media_owner_status" ON "evidence_media" USING btree ("installation_id","status","expires_at");--> statement-breakpoint
 CREATE INDEX "idx_facilities_place" ON "facilities" USING btree ("place_id");--> statement-breakpoint

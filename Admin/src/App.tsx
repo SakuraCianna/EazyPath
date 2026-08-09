@@ -10,6 +10,7 @@ import { OperationalListPage } from './pages/OperationalListPage';
 import { SettingsPage } from './pages/SettingsPage';
 import { AdminAccessPage } from './pages/AdminAccessPage';
 import { AccountSecurityPage } from './pages/AccountSecurityPage';
+import { CommunityReviewsPage } from './pages/CommunityReviewsPage';
 
 export function App() {
   const { identity, loading } = useAuth();
@@ -25,7 +26,7 @@ export function App() {
         <Route index element={<DashboardPage />} />
         <Route path="places" element={<PlacesPage />} />
         <Route path="reviews" element={<ReviewsPage />} />
-        <Route path="community" element={<OperationalListPage kind="community" />} />
+        <Route path="community" element={<CommunityReviewsPage />} />
         <Route path="verifications" element={<Navigate to="/reviews?queue=verifications" replace />} />
         <Route path="users" element={<OperationalListPage kind="users" />} />
         <Route path="tasks" element={<OperationalListPage kind="tasks" />} />

@@ -13,6 +13,7 @@ import {
 
 export type PlaceStatus = 'active' | 'disabled' | 'merged';
 export type PlaceMutationResult<T> = { ok: true; value: T } | { ok: false; code: string; message: string };
+type PlaceTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
 interface PlaceFields {
   name: string;
@@ -183,7 +184,7 @@ export async function setAdminPlaceStatus(input: MutationContext & { placeId: st
 
 export async function mergeAdminPlace(input: MutationContext & { sourcePlaceId: string; targetPlaceId: string; expectedSourceUpdatedAt: Date; expectedTargetUpdatedAt: Date }): Promise<PlaceMutationResult<{ sourceId: string; targetId: string; mergedAt: Date }>> {
   if (input.sourcePlaceId === input.targetPlaceId) return failure('PLACE_MERGE_SELF', '地点不能合并到自身');
-  return db.transaction(async (tx) => {
+  return withPlaceTransactionRetry(async (tx) => {
     const locked = await tx.select().from(places)
       .where(inArray(places.id, [input.sourcePlaceId, input.targetPlaceId]))
       .orderBy(asc(places.id)).for('update');
@@ -196,12 +197,13 @@ export async function mergeAdminPlace(input: MutationContext & { sourcePlaceId: 
     if (source.status === 'merged') return failure('PLACE_MERGED_READ_ONLY', '来源地点已经合并');
     if (target.status !== 'active') return failure('PLACE_MERGE_TARGET_INVALID', '目标地点必须处于启用状态');
     const now = new Date();
-    await tx.update(placeUnits).set({ placeId: target.id, updatedAt: now }).where(eq(placeUnits.placeId, source.id));
-    await tx.update(facilities).set({ placeId: target.id, updatedAt: now }).where(eq(facilities.placeId, source.id));
-    await tx.update(observations).set({ placeId: target.id, updatedAt: now }).where(eq(observations.placeId, source.id));
-    await tx.update(verificationRecords).set({ placeId: target.id, updatedAt: now }).where(eq(verificationRecords.placeId, source.id));
+    // 与社区投票保持 task -> proof -> observation 的锁顺序，避免地点合并和投票互相等待。
     await tx.update(communityReviewTasks).set({ placeId: target.id, updatedAt: now }).where(eq(communityReviewTasks.placeId, source.id));
     await tx.update(locationProofs).set({ placeId: target.id }).where(eq(locationProofs.placeId, source.id));
+    await tx.update(observations).set({ placeId: target.id, updatedAt: now }).where(eq(observations.placeId, source.id));
+    await tx.update(placeUnits).set({ placeId: target.id, updatedAt: now }).where(eq(placeUnits.placeId, source.id));
+    await tx.update(facilities).set({ placeId: target.id, updatedAt: now }).where(eq(facilities.placeId, source.id));
+    await tx.update(verificationRecords).set({ placeId: target.id, updatedAt: now }).where(eq(verificationRecords.placeId, source.id));
     const redirectedAliases = await tx.update(places).set({ mergedIntoPlaceId: target.id, updatedAt: now })
       .where(and(eq(places.mergedIntoPlaceId, source.id), eq(places.status, 'merged')))
       .returning({ id: places.id });
@@ -217,6 +219,23 @@ export async function mergeAdminPlace(input: MutationContext & { sourcePlaceId: 
 
 function failure(code: string, message: string) {
   return { ok: false as const, code, message };
+}
+
+async function withPlaceTransactionRetry<T>(operation: (tx: PlaceTransaction) => Promise<T>): Promise<T> {
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      return await db.transaction(operation);
+    } catch (error: unknown) {
+      if (!isRetryableTransactionError(error) || attempt === 3) throw error;
+      await new Promise((resolve) => setTimeout(resolve, attempt * 25 + Math.floor(Math.random() * 25)));
+    }
+  }
+  throw new Error('PLACE_TRANSACTION_RETRY_EXHAUSTED');
+}
+
+function isRetryableTransactionError(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'code' in error
+    && (error.code === '40P01' || error.code === '40001');
 }
 
 function placeAuditView(place: typeof places.$inferSelect) {

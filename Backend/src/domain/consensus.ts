@@ -38,6 +38,17 @@ export interface ConsensusResult {
   votes: WeightedVote[];
 }
 
+export interface PublicConsensusSnapshot {
+  status: unknown;
+  outcome: unknown;
+  presentWeight: unknown;
+  absentWeight: unknown;
+  directionalWeight: unknown;
+  dominantRatio: unknown;
+  distinctInstallations: unknown;
+  snapshot: ConsensusPolicy | Record<string, unknown>;
+}
+
 export const defaultConsensusPolicy: ConsensusPolicy = {
   version: 'mvp-1',
   minimumInstallations: 3,
@@ -104,6 +115,13 @@ export function calculateConsensus(
     };
   });
 
+  return calculateWeightedConsensus(votes, policy);
+}
+
+export function calculateWeightedConsensus(
+  votes: WeightedVote[],
+  policy: ConsensusPolicy = defaultConsensusPolicy,
+): ConsensusResult {
   const presentWeight = sumAnswer(votes, 'present');
   const absentWeight = sumAnswer(votes, 'absent');
   const directionalWeight = presentWeight + absentWeight;
@@ -135,14 +153,53 @@ export function calculateConsensus(
     absentWeight,
     directionalWeight,
     dominantRatio,
-    distinctInstallations: votes.length,
+    distinctInstallations: votes.filter((vote) => !vote.suspended).length,
     snapshot: policy,
     votes,
   };
 }
 
+export function toPublicConsensusSnapshot(result: ConsensusResult): PublicConsensusSnapshot {
+  return {
+    status: result.status,
+    outcome: result.outcome,
+    presentWeight: result.presentWeight,
+    absentWeight: result.absentWeight,
+    directionalWeight: result.directionalWeight,
+    dominantRatio: result.dominantRatio,
+    distinctInstallations: result.distinctInstallations,
+    snapshot: result.snapshot,
+  };
+}
+
+export function sanitizeStoredConsensusSnapshot(value: unknown): PublicConsensusSnapshot | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const source = value as Record<string, unknown>;
+  const policy = source.snapshot && typeof source.snapshot === 'object' && !Array.isArray(source.snapshot)
+    ? source.snapshot as Record<string, unknown>
+    : {};
+  return {
+    status: source.status,
+    outcome: source.outcome,
+    presentWeight: source.presentWeight,
+    absentWeight: source.absentWeight,
+    directionalWeight: source.directionalWeight,
+    dominantRatio: source.dominantRatio,
+    distinctInstallations: source.distinctInstallations,
+    snapshot: {
+      version: policy.version,
+      minimumInstallations: policy.minimumInstallations,
+      minimumDirectionalWeight: policy.minimumDirectionalWeight,
+      dominanceRatio: policy.dominanceRatio,
+      requireEstablishedInstallation: policy.requireEstablishedInstallation,
+      requireLocatedMediaVote: policy.requireLocatedMediaVote,
+      newInstallationWeightCap: policy.newInstallationWeightCap,
+    },
+  };
+}
+
 function sumAnswer(votes: WeightedVote[], answer: ReviewAnswer): number {
   return votes
-    .filter((vote) => vote.answer === answer)
+    .filter((vote) => vote.answer === answer && !vote.suspended)
     .reduce((total, vote) => total + vote.weight, 0);
 }

@@ -32,6 +32,7 @@ import {
 import type { AppBindings } from '../types.js';
 import { adminReviewsRouter } from './admin-reviews.js';
 import { adminPlacesRouter } from './admin-places.js';
+import { adminCommunityReviewsRouter } from './admin-community-reviews.js';
 
 const platformSchema = z.object({
   platform: z.string().min(1).max(32),
@@ -68,6 +69,7 @@ adminRouter.use('*', requireAdmin);
 adminRouter.use('*', requireAdminCsrf);
 adminRouter.route('/reviews', adminReviewsRouter);
 adminRouter.route('/places', adminPlacesRouter);
+adminRouter.route('/community-reviews', adminCommunityReviewsRouter);
 
 adminRouter.get('/dashboard', requireAdminPermission('dashboard.read'), async (c) => {
   const now = new Date();
@@ -118,18 +120,6 @@ adminRouter.post('/platform-links', requireAdminPermission('platform_links.manag
 });
 
 adminRouter.get('/tasks', requireAdminPermission('tasks.read'), async (c) => ok(c, await db.select().from(agentTasks).orderBy(desc(agentTasks.createdAt)).limit(100)));
-adminRouter.get('/community-reviews', requireAdminPermission('reviews.read'), async (c) => ok(c, await db.select({
-  id: communityReviewTasks.id,
-  placeName: places.name,
-  featureKey: featureDefinitions.featureKey,
-  status: communityReviewTasks.status,
-  reason: communityReviewTasks.reason,
-  consensusOutcome: communityReviewTasks.consensusOutcome,
-  consensusSnapshot: communityReviewTasks.consensusSnapshot,
-  locationRadiusMeters: communityReviewTasks.locationRadiusMeters,
-  createdAt: communityReviewTasks.createdAt,
-  updatedAt: communityReviewTasks.updatedAt,
-}).from(communityReviewTasks).innerJoin(places, eq(communityReviewTasks.placeId, places.id)).innerJoin(featureDefinitions, eq(communityReviewTasks.featureDefinitionId, featureDefinitions.id)).orderBy(desc(communityReviewTasks.updatedAt)).limit(100)));
 adminRouter.get('/installations', requireAdminPermission('installations.read'), async (c) => ok(c, await db.select({
   id: installationAccounts.id,
   installationGuid: installationAccounts.installationGuid,

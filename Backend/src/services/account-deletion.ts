@@ -1,7 +1,9 @@
-import { and, eq, inArray, isNotNull, isNull, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNotNull, isNull, or, sql } from 'drizzle-orm';
 import { revokeUserSessions } from '../auth/tokens.js';
 import {
   auditEvents,
+  communityReviewTasks,
+  communityReviewVotes,
   db,
   evidenceMedia,
   installationAccounts,
@@ -11,6 +13,8 @@ import {
   userFeedback,
 } from '../db/index.js';
 import { sha256 } from '../lib/crypto.js';
+import { toPublicConsensusSnapshot } from '../domain/consensus.js';
+import { recomputeCommunityConsensus } from './community-consensus.js';
 import { removeEvidenceFile, removeUploadDirectory } from './media-storage.js';
 
 interface AccountDeletionStart {
@@ -32,6 +36,7 @@ interface AccountDeletionCleanupRequired {
 }
 
 type AccountDeletionFinalization = AccountDeletionFinalized | AccountDeletionCleanupRequired;
+const ACTIVE_COMMUNITY_REVIEW_STATUSES = ['pending_review', 'community_consensus', 'conflicting'] as const;
 
 export interface AccountDeletionDependencies {
   beginDeletion: (installationId: string) => Promise<AccountDeletionStart | null>;
@@ -128,12 +133,27 @@ const productionDependencies: AccountDeletionDependencies = {
         await tx.update(installationAccounts).set({ status: 'deleting', updatedAt: new Date() })
           .where(eq(installationAccounts.id, installationId));
       }
+      const now = new Date();
+      const affectedVoteRows = await tx.selectDistinct({ taskId: communityReviewVotes.reviewTaskId })
+        .from(communityReviewVotes)
+        .innerJoin(communityReviewTasks, eq(communityReviewVotes.reviewTaskId, communityReviewTasks.id))
+        .where(and(
+          eq(communityReviewVotes.installationId, installationId),
+          inArray(communityReviewTasks.status, ACTIVE_COMMUNITY_REVIEW_STATUSES),
+        ));
+      const affectedTaskIds = affectedVoteRows.map((row) => row.taskId);
+      const affectedTasks = affectedTaskIds.length === 0 ? [] : await tx.select().from(communityReviewTasks)
+        .where(and(
+          inArray(communityReviewTasks.id, affectedTaskIds),
+          inArray(communityReviewTasks.status, ACTIVE_COMMUNITY_REVIEW_STATUSES),
+        ))
+        .orderBy(asc(communityReviewTasks.id))
+        .for('update');
       const observationRows = await tx.select({ id: observations.id }).from(observations)
         .where(and(
           eq(observations.installationId, installationId),
           eq(observations.evidenceSource, 'community'),
         ));
-      const now = new Date();
       await tx.update(observations).set({
         moderationStatus: 'withdrawn',
         moderationReason: '匿名账户已删除，证据停止公开',
@@ -147,6 +167,53 @@ const productionDependencies: AccountDeletionDependencies = {
         eq(observations.evidenceSource, 'community'),
         isNull(observations.withdrawnAt),
       ));
+      await tx.update(communityReviewVotes).set({ suspended: true, updatedAt: now })
+        .where(eq(communityReviewVotes.installationId, installationId));
+      for (const task of affectedTasks) {
+        const result = await recomputeCommunityConsensus(tx, task.id);
+        await tx.update(communityReviewTasks).set({
+          status: result.status,
+          consensusOutcome: result.outcome,
+          consensusSnapshot: toPublicConsensusSnapshot(result),
+          updatedAt: now,
+        }).where(eq(communityReviewTasks.id, task.id));
+        if (task.targetType === 'observation') {
+          const [latestTask] = await tx.select({ id: communityReviewTasks.id }).from(communityReviewTasks)
+            .where(and(
+              eq(communityReviewTasks.targetType, 'observation'),
+              eq(communityReviewTasks.targetId, task.targetId),
+            ))
+            .orderBy(desc(communityReviewTasks.createdAt), desc(communityReviewTasks.id))
+            .limit(1);
+          if (latestTask?.id === task.id) {
+            const latestEligibleVoteAt = result.votes
+              .filter((vote) => !vote.suspended)
+              .reduce((latest, vote) => Math.max(latest, vote.submittedAt.getTime()), 0);
+            const evidenceExpiresAt = new Date(latestEligibleVoteAt + 90 * 24 * 60 * 60 * 1000);
+            const remainsCurrent = result.status === 'community_consensus'
+              && result.outcome === 'present'
+              && latestEligibleVoteAt > 0
+              && evidenceExpiresAt > now;
+            await tx.update(observations).set({
+              freshnessStatus: remainsCurrent ? 'current' : result.status === 'conflicting' ? 'conflicting' : 'expired',
+              evidenceGrade: remainsCurrent ? 'B' : 'U',
+              expiresAt: remainsCurrent ? evidenceExpiresAt : now,
+              updatedAt: now,
+            }).where(and(
+              eq(observations.id, task.targetId),
+              eq(observations.moderationStatus, 'approved'),
+              isNull(observations.withdrawnAt),
+            ));
+          }
+        }
+        await tx.insert(auditEvents).values({
+          actorType: 'system',
+          action: 'community_review.vote_suspended_for_privacy',
+          targetType: 'community_review_task',
+          targetId: task.id,
+          metadata: { status: result.status, outcome: result.outcome },
+        });
+      }
       const deletedFeedback = await tx.delete(userFeedback)
         .where(eq(userFeedback.installationId, installationId))
         .returning({ id: userFeedback.id });

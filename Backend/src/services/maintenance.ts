@@ -10,6 +10,7 @@ import {
   mediaUploadSessions,
   observationMedia,
   observations,
+  places,
   userFeedback,
   verificationRecords,
 } from '../db/index.js';
@@ -156,19 +157,30 @@ export async function expireEvidenceAndCreateReviews(): Promise<void> {
   const expired = await db.select().from(observations).where(and(eq(observations.freshnessStatus, 'current'), lte(observations.expiresAt, now), isNull(observations.withdrawnAt)));
   for (const observation of expired) {
     await db.transaction(async (tx) => {
-      await tx.update(observations).set({ freshnessStatus: 'expired', evidenceGrade: 'U', updatedAt: now }).where(eq(observations.id, observation.id));
-      const [existing] = await tx.select({ id: communityReviewTasks.id }).from(communityReviewTasks).where(and(eq(communityReviewTasks.targetType, 'observation'), eq(communityReviewTasks.targetId, observation.id), eq(communityReviewTasks.status, 'pending_review'))).limit(1);
+      const [lockedPlace] = await tx.select({ id: places.id }).from(places)
+        .where(eq(places.id, observation.placeId)).for('update').limit(1);
+      if (!lockedPlace) return;
+      const [current] = await tx.select().from(observations).where(and(
+        eq(observations.id, observation.id),
+        eq(observations.placeId, lockedPlace.id),
+        eq(observations.freshnessStatus, 'current'),
+        lte(observations.expiresAt, now),
+        isNull(observations.withdrawnAt),
+      )).for('update').limit(1);
+      if (!current) return;
+      await tx.update(observations).set({ freshnessStatus: 'expired', evidenceGrade: 'U', updatedAt: now }).where(eq(observations.id, current.id));
+      const [existing] = await tx.select({ id: communityReviewTasks.id }).from(communityReviewTasks).where(and(eq(communityReviewTasks.targetType, 'observation'), eq(communityReviewTasks.targetId, current.id), eq(communityReviewTasks.status, 'pending_review'))).limit(1);
       if (!existing) {
         await tx.insert(communityReviewTasks).values({
-          placeId: observation.placeId,
+          placeId: current.placeId,
           targetType: 'observation',
-          targetId: observation.id,
-          featureDefinitionId: observation.featureDefinitionId,
+          targetId: current.id,
+          featureDefinitionId: current.featureDefinitionId,
           reason: 'evidence_expired',
           status: 'pending_review',
         });
       }
-      const mediaLinks = await tx.select({ mediaId: observationMedia.mediaId }).from(observationMedia).where(eq(observationMedia.observationId, observation.id));
+      const mediaLinks = await tx.select({ mediaId: observationMedia.mediaId }).from(observationMedia).where(eq(observationMedia.observationId, current.id));
       if (mediaLinks.length > 0) {
         await tx.update(evidenceMedia).set({ expiresAt: new Date(now.getTime() + 90 * 24 * 60 * 60 * 1000), updatedAt: now }).where(inArray(evidenceMedia.id, mediaLinks.map((link) => link.mediaId)));
       }
