@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.Rect
 import android.net.Uri
 import com.eazypath.BuildConfig
+import com.eazypath.data.location.OneShotLocationProvider
 import com.eazypath.data.media.EvidenceImageAnalysis
 import com.eazypath.data.media.EvidenceImageRedactor
 import com.eazypath.data.media.PreparedEvidence
@@ -14,6 +15,8 @@ import com.eazypath.data.network.CreateTaskRequest
 import com.eazypath.data.network.EazyPathApiService
 import com.eazypath.data.network.FeatureDefinition
 import com.eazypath.data.network.InteractionProfile
+import com.eazypath.data.network.LocationProofData
+import com.eazypath.data.network.LocationProofRequest
 import com.eazypath.data.network.MobilityProfile
 import com.eazypath.data.network.NetworkClient
 import com.eazypath.data.network.ObservationData
@@ -23,6 +26,8 @@ import com.eazypath.data.network.ProfileData
 import com.eazypath.data.network.RefreshRequest
 import com.eazypath.data.network.RegisterRequest
 import com.eazypath.data.network.ReviewTask
+import com.eazypath.data.network.ReviewTaskPage
+import com.eazypath.data.network.ReviewSubmissionData
 import com.eazypath.data.network.TaskDetails
 import com.eazypath.data.network.UpdateProfileRequest
 import com.eazypath.data.network.UploadInitializeRequest
@@ -53,6 +58,7 @@ class EazyPathRepository(private val context: Context) {
     private val sessionStore = SecureSessionStore(context)
     private val sessionMutex = Mutex()
     private val network = NetworkClient { sessionStore.readSafely()?.accessToken }
+    private val locationProvider = OneShotLocationProvider(context)
     private val publicApi: EazyPathApiService = network.publicApi
     private val api: EazyPathApiService = network.authenticatedApi
 
@@ -137,14 +143,40 @@ class EazyPathRepository(private val context: Context) {
         return api.getVerification(id).requireData()
     }
 
-    suspend fun getReviewTasks(): List<ReviewTask> {
+    suspend fun getReviewTasks(cursor: String? = null): ReviewTaskPage {
         ensureSession()
-        return api.getReviewTasks().requireData()
+        return api.getReviewTasks(cursor).requireData()
     }
 
-    suspend fun submitReview(id: String, answer: String) {
+    suspend fun getMyReviewSubmission(id: String, submissionId: String): ReviewSubmissionData {
         ensureSession()
-        api.submitReview(id, VoteRequest(answer)).requireData()
+        return api.getMyReviewSubmission(id, submissionId).requireData()
+    }
+
+    suspend fun verifyReviewLocation(reviewTaskId: String, placeId: String): LocationProofData {
+        ensureSession()
+        val location = locationProvider.locateAfterPrivacyConsent()
+        return api.verifyLocationProof(
+            LocationProofRequest(
+                placeId = placeId,
+                reviewTaskId = reviewTaskId,
+                latitude = location.latitude,
+                longitude = location.longitude,
+                accuracyMeters = location.accuracyMeters,
+            ),
+        ).requireData().also { require(it.proofId != null) { "服务端未返回有效的位置证明" } }
+    }
+
+    suspend fun submitReview(
+        id: String,
+        submissionId: String,
+        answer: String,
+        locationProofId: String?,
+        evidence: PreparedEvidence?,
+    ): ReviewSubmissionData {
+        ensureSession()
+        val mediaId = evidence?.let { uploadEvidence(it) }
+        return api.submitReview(id, VoteRequest(submissionId, answer, mediaId, locationProofId)).requireData()
     }
 
     suspend fun searchPlaces(query: String): List<PlaceSearchItem> {

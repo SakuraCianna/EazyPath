@@ -1,8 +1,8 @@
-import { and, desc, eq, gt, gte, inArray, isNull, ne, or, sql } from 'drizzle-orm';
+import { and, desc, eq, gt, gte, inArray, isNull, lt, ne, or, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { getEnv } from '../config/env.js';
-import { calculateVoteWeight, toPublicConsensusSnapshot, type ReviewVoteInput } from '../domain/consensus.js';
+import { calculateVoteWeight, sanitizeStoredConsensusSnapshot, toPublicConsensusSnapshot, type ReviewVoteInput } from '../domain/consensus.js';
 import { canSubmitObservationAppeal, FEEDBACK_RESPONSE_WINDOW_MS } from '../domain/moderation.js';
 import {
   auditEvents,
@@ -23,10 +23,12 @@ import {
 import { fail, ok } from '../lib/api-response.js';
 import { requireUser } from '../middleware/auth.js';
 import { isFeatureValueCompatible } from '../domain/feature-values.js';
+import { evaluateLocationProof } from '../domain/location-proof.js';
 import { lockCanonicalPlace, resolveActivePlace } from '../services/place-resolution.js';
 import {
   CommunityReviewProtectionUnavailableError,
   consumeCommunityReviewPermit,
+  consumeLocationProofPermit,
   fingerprintCommunityReviewSource,
 } from '../services/community-review-guard.js';
 import { recomputeCommunityConsensus } from '../services/community-consensus.js';
@@ -45,12 +47,17 @@ const observationSchema = z.object({
 
 const proofSchema = z.object({
   place_id: z.uuid(),
+  review_task_id: z.uuid().optional(),
   latitude: z.number().min(-90).max(90),
   longitude: z.number().min(-180).max(180),
   accuracy_meters: z.number().positive().max(500),
 });
 
+const reviewTaskListSchema = z.object({ cursor: z.string().max(512).optional() });
+const mySubmissionQuerySchema = z.object({ submission_id: z.uuid() });
+
 const voteSchema = z.object({
+  submission_id: z.uuid(),
   answer: z.enum(['present', 'absent', 'unknown']),
   media_id: z.uuid().optional(),
   location_proof_id: z.uuid().optional(),
@@ -103,6 +110,7 @@ observationsRouter.post('/', async (c) => {
     eq(locationProofs.id, input.location_proof_id),
     eq(locationProofs.installationId, c.get('installationId')),
     eq(locationProofs.placeId, place.id),
+    isNull(locationProofs.reviewTaskId),
     gt(locationProofs.expiresAt, new Date()),
     isNull(locationProofs.consumedAt),
   )).limit(1))[0] : undefined;
@@ -120,6 +128,7 @@ observationsRouter.post('/', async (c) => {
       if (!lockedPlace) throw new CommunityConflictError('PLACE_NOT_ACTIVE');
       const claimedProof = proof ? (await tx.update(locationProofs).set({ consumedAt: new Date() }).where(and(
         eq(locationProofs.id, proof.id),
+        isNull(locationProofs.reviewTaskId),
         gt(locationProofs.expiresAt, new Date()),
         isNull(locationProofs.consumedAt),
       )).returning({
@@ -189,6 +198,11 @@ observationsRouter.post('/:id/withdraw', async (c) => {
       .for('update')
       .limit(1);
     if (account?.status !== 'active') return false;
+    const activeReviewTasks = await tx.select({ id: communityReviewTasks.id }).from(communityReviewTasks).where(and(
+      eq(communityReviewTasks.targetType, 'observation'),
+      eq(communityReviewTasks.targetId, c.req.param('id')),
+      or(eq(communityReviewTasks.status, 'pending_review'), eq(communityReviewTasks.status, 'conflicting')),
+    )).orderBy(communityReviewTasks.id).for('update');
     const [observation] = await tx.select().from(observations).where(and(
     eq(observations.id, c.req.param('id')),
     eq(observations.installationId, c.get('installationId')),
@@ -196,6 +210,14 @@ observationsRouter.post('/:id/withdraw', async (c) => {
     isNull(observations.withdrawnAt),
     )).for('update').limit(1);
     if (!observation) return false;
+    if (activeReviewTasks.length > 0) {
+      await tx.update(communityReviewTasks).set({
+        status: 'cancelled',
+        resolutionReason: '原社区观测已由提交者撤回',
+        resolvedAt: now,
+        updatedAt: now,
+      }).where(inArray(communityReviewTasks.id, activeReviewTasks.map((task) => task.id)));
+    }
     await tx.update(observations).set({
       withdrawnAt: now,
       moderationStatus: 'withdrawn',
@@ -462,24 +484,82 @@ observationsRouter.post('/:id/supplements', async (c) => {
 locationProofsRouter.post('/verify', async (c) => {
   const parsed = proofSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return fail(c, 422, 'LOCATION_PROOF_INVALID', '位置证明参数无效');
+  const env = getEnv();
+  const realIp = c.req.header('x-real-ip');
+  const forwardedFor = c.req.header('x-forwarded-for');
+  const sourceFingerprint = fingerprintCommunityReviewSource({
+    trustProxy: env.TRUST_PROXY,
+    ...(realIp ? { realIp } : {}),
+    ...(forwardedFor ? { forwardedFor } : {}),
+  }, env.AUTH_TOKEN_SECRET);
+  let permit;
+  try {
+    permit = await consumeLocationProofPermit(c.get('installationId'), sourceFingerprint);
+  } catch (error) {
+    if (error instanceof CommunityReviewProtectionUnavailableError) {
+      return fail(c, 503, 'LOCATION_PROOF_PROTECTION_UNAVAILABLE', '位置校验保护暂不可用，请稍后重试', { retryable: true });
+    }
+    throw error;
+  }
+  if (!permit.allowed) {
+    c.header('Retry-After', String(permit.retryAfterSeconds));
+    return fail(c, 429, 'LOCATION_PROOF_RATE_LIMITED', '位置校验过于频繁，请稍后再试', { retryable: true });
+  }
   const candidate = await resolveActivePlace(parsed.data.place_id);
   if (!candidate) return fail(c, 404, 'PLACE_NOT_FOUND', '地点不存在或已停用');
   const result = await db.transaction(async (tx) => {
+    const [account] = await tx.select({ id: installationAccounts.id }).from(installationAccounts).where(and(
+      eq(installationAccounts.id, c.get('installationId')),
+      eq(installationAccounts.status, 'active'),
+    )).for('update').limit(1);
+    if (!account) return { kind: 'account_inactive' } as const;
     const place = await lockCanonicalPlace(tx, candidate.id);
-    if (!place) return undefined;
+    if (!place) return { kind: 'place_changed' } as const;
+    const reviewTask = parsed.data.review_task_id ? (await tx.select({
+      id: communityReviewTasks.id,
+      locationRadiusMeters: communityReviewTasks.locationRadiusMeters,
+    }).from(communityReviewTasks).where(and(
+      eq(communityReviewTasks.id, parsed.data.review_task_id),
+      eq(communityReviewTasks.placeId, place.id),
+      or(eq(communityReviewTasks.status, 'pending_review'), eq(communityReviewTasks.status, 'conflicting')),
+    )).for('update').limit(1))[0] : undefined;
+    if (parsed.data.review_task_id && !reviewTask) return { kind: 'review_task_invalid' } as const;
     const distance = haversineMeters(parsed.data.latitude, parsed.data.longitude, Number(place.latitude), Number(place.longitude));
-    const effectiveDistance = distance + parsed.data.accuracy_meters;
-    const passed = effectiveDistance <= 200;
-    const bucket = effectiveDistance <= 50 ? 'within_50m' : effectiveDistance <= 200 ? 'within_200m' : effectiveDistance <= 1000 ? 'within_1km' : 'over_1km';
+    const radiusMeters = reviewTask?.locationRadiusMeters ?? 200;
+    const { passed, distanceBucket: bucket } = evaluateLocationProof(distance, parsed.data.accuracy_meters, radiusMeters);
     const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
-    const [proof] = await tx.insert(locationProofs).values({ installationId: c.get('installationId'), placeId: place.id, passed, distanceBucket: bucket, expiresAt }).returning();
-    return { proof, place, passed, bucket, expiresAt };
+    const [proof] = await tx.insert(locationProofs).values({
+      installationId: account.id, placeId: place.id, reviewTaskId: reviewTask?.id, passed, distanceBucket: bucket, expiresAt,
+    }).returning();
+    return { kind: 'created', proof, place, passed, bucket, expiresAt, radiusMeters } as const;
   });
-  if (!result) return fail(c, 409, 'PLACE_STATE_CHANGED', '地点状态刚刚发生变化，请刷新地点后重新验证位置');
-  return ok(c, { proof_id: result.proof?.id, canonical_place_id: result.place.id, passed: result.passed, distance_bucket: result.bucket, expires_at: result.expiresAt, privacy_notice: '精确坐标未保存，仅保留通过结果和粗粒度距离区间。' });
+  if (result.kind === 'account_inactive') return fail(c, 403, 'ACCOUNT_NOT_ACTIVE', '匿名账户当前不可创建位置证明');
+  if (result.kind === 'place_changed') return fail(c, 409, 'PLACE_STATE_CHANGED', '地点状态刚刚发生变化，请刷新地点后重新验证位置');
+  if (result.kind === 'review_task_invalid') return fail(c, 409, 'REVIEW_TASK_NOT_ACTIVE', '复核任务不存在、地点不匹配或已经结束');
+  return ok(c, { proof_id: result.proof?.id, canonical_place_id: result.place.id, review_task_id: result.proof?.reviewTaskId, passed: result.passed, distance_bucket: result.bucket, radius_meters: result.radiusMeters, expires_at: result.expiresAt, privacy_notice: '精确坐标未保存，仅保留通过结果、粗粒度距离区间和校验时间。' });
 });
 
 reviewTasksRouter.get('/', async (c) => {
+  const query = reviewTaskListSchema.safeParse(c.req.query());
+  if (!query.success) return fail(c, 422, 'REVIEW_TASK_CURSOR_INVALID', '复核任务游标无效');
+  const cursor = query.data.cursor ? decodeReviewTaskCursor(query.data.cursor) : undefined;
+  if (query.data.cursor && !cursor) return fail(c, 422, 'REVIEW_TASK_CURSOR_INVALID', '复核任务游标无效');
+  const activeCondition = or(
+    eq(communityReviewTasks.status, 'pending_review'),
+    eq(communityReviewTasks.status, 'conflicting'),
+  )!;
+  const independentReviewerCondition = or(
+    ne(communityReviewTasks.targetType, 'observation'),
+    isNull(observations.installationId),
+    ne(observations.installationId, c.get('installationId')),
+  )!;
+  const cursorCondition = cursor ? or(
+    lt(communityReviewTasks.createdAt, cursor.createdAt),
+    and(
+      eq(communityReviewTasks.createdAt, cursor.createdAt),
+      lt(communityReviewTasks.id, cursor.id),
+    ),
+  ) : undefined;
   const rows = await db.select({
     id: communityReviewTasks.id,
     status: communityReviewTasks.status,
@@ -489,12 +569,71 @@ reviewTasksRouter.get('/', async (c) => {
     location_radius_meters: communityReviewTasks.locationRadiusMeters,
     feature_key: featureDefinitions.featureKey,
     feature_name: featureDefinitions.displayName,
+    feature_unit: featureDefinitions.unit,
     place_id: places.id,
     place_name: places.name,
     address: places.address,
+    historical_value: observations.valueJson,
+    historical_source: observations.evidenceSource,
+    historical_grade: observations.evidenceGrade,
+    historical_freshness_status: observations.freshnessStatus,
+    historical_moderation_status: observations.moderationStatus,
+    historical_observed_at: observations.observedAt,
+    historical_expires_at: observations.expiresAt,
+    historical_has_redacted_media: sql<boolean>`EXISTS (
+      SELECT 1 FROM ${observationMedia}
+      INNER JOIN ${evidenceMedia} ON ${evidenceMedia.id} = ${observationMedia.mediaId}
+      WHERE ${observationMedia.observationId} = ${observations.id}
+        AND ${evidenceMedia.redactionConfirmed} = TRUE
+        AND ${evidenceMedia.status} = 'linked'
+        AND ${evidenceMedia.deletedAt} IS NULL
+    )`,
     created_at: communityReviewTasks.createdAt,
-  }).from(communityReviewTasks).innerJoin(places, eq(communityReviewTasks.placeId, places.id)).innerJoin(featureDefinitions, eq(communityReviewTasks.featureDefinitionId, featureDefinitions.id)).where(or(eq(communityReviewTasks.status, 'pending_review'), eq(communityReviewTasks.status, 'conflicting'))).orderBy(desc(communityReviewTasks.createdAt)).limit(50);
-  return ok(c, rows);
+  }).from(communityReviewTasks)
+    .innerJoin(places, eq(communityReviewTasks.placeId, places.id))
+    .innerJoin(featureDefinitions, eq(communityReviewTasks.featureDefinitionId, featureDefinitions.id))
+    .leftJoin(observations, and(
+      eq(communityReviewTasks.targetType, 'observation'),
+      eq(communityReviewTasks.targetId, observations.id),
+    ))
+    .where(and(
+      activeCondition,
+      eq(places.status, 'active'),
+      independentReviewerCondition,
+      or(
+        ne(communityReviewTasks.targetType, 'observation'),
+        and(eq(observations.moderationStatus, 'approved'), isNull(observations.withdrawnAt)),
+      ),
+      cursorCondition,
+    ))
+    .orderBy(desc(communityReviewTasks.createdAt), desc(communityReviewTasks.id)).limit(51);
+  const items = rows.slice(0, 50);
+  const last = items.at(-1);
+  return ok(c, {
+    items,
+    next_cursor: rows.length > 50 && last ? encodeReviewTaskCursor(last.created_at, last.id) : null,
+  });
+});
+
+reviewTasksRouter.get('/:id/my-submission', async (c) => {
+  const taskId = c.req.param('id');
+  if (!z.uuid().safeParse(taskId).success) return fail(c, 422, 'REVIEW_TASK_ID_INVALID', '复核任务 ID 无效');
+  const query = mySubmissionQuerySchema.safeParse(c.req.query());
+  if (!query.success) return fail(c, 422, 'REVIEW_SUBMISSION_ID_INVALID', '复核提交 ID 无效');
+  const [row] = await db.select({
+    finalWeight: communityReviewVotes.finalWeight,
+    consensusSnapshot: communityReviewTasks.consensusSnapshot,
+  }).from(communityReviewVotes)
+    .innerJoin(communityReviewTasks, eq(communityReviewVotes.reviewTaskId, communityReviewTasks.id))
+    .where(and(
+      eq(communityReviewVotes.reviewTaskId, taskId),
+      eq(communityReviewVotes.installationId, c.get('installationId')),
+      eq(communityReviewVotes.clientSubmissionId, query.data.submission_id),
+    )).limit(1);
+  if (!row) return fail(c, 404, 'REVIEW_SUBMISSION_NOT_FOUND', '尚未找到你的本轮复核结果', { retryable: true });
+  const consensus = sanitizeStoredConsensusSnapshot(row.consensusSnapshot);
+  if (!consensus) return fail(c, 409, 'REVIEW_SUBMISSION_PENDING', '复核结果仍在收敛，请稍后查询', { retryable: true });
+  return ok(c, { vote_weight: Number(row.finalWeight), consensus });
 });
 
 reviewTasksRouter.post('/:id/submissions', async (c) => {
@@ -522,16 +661,50 @@ reviewTasksRouter.post('/:id/submissions', async (c) => {
     c.header('Retry-After', String(permit.retryAfterSeconds));
     return fail(c, 429, 'COMMUNITY_REVIEW_RATE_LIMITED', '复核提交过于频繁，请稍后再试', { retryable: true });
   }
+  const [taskReference] = await db.select({ placeId: communityReviewTasks.placeId })
+    .from(communityReviewTasks).where(eq(communityReviewTasks.id, c.req.param('id'))).limit(1);
+  if (!taskReference) return fail(c, 404, 'REVIEW_TASK_NOT_FOUND', '复核任务不存在或已结束');
   const outcome = await db.transaction(async (tx) => {
     const now = new Date();
     const [account] = await tx.select().from(installationAccounts)
       .where(eq(installationAccounts.id, c.get('installationId'))).for('update').limit(1);
     if (!account || account.status !== 'active') return { kind: 'account_inactive' } as const;
+    const [replayedVote] = await tx.select({
+      finalWeight: communityReviewVotes.finalWeight,
+    }).from(communityReviewVotes).where(and(
+      eq(communityReviewVotes.reviewTaskId, c.req.param('id')),
+      eq(communityReviewVotes.installationId, account.id),
+      eq(communityReviewVotes.clientSubmissionId, parsed.data.submission_id),
+    )).for('update').limit(1);
+    if (replayedVote) {
+      const [replayedTask] = await tx.select({ consensusSnapshot: communityReviewTasks.consensusSnapshot })
+        .from(communityReviewTasks).where(eq(communityReviewTasks.id, c.req.param('id'))).limit(1);
+      const consensus = sanitizeStoredConsensusSnapshot(replayedTask?.consensusSnapshot);
+      if (consensus) return { kind: 'replayed', voteWeight: Number(replayedVote.finalWeight), consensus } as const;
+    }
+    const [activePlace] = await tx.select({ id: places.id }).from(places).where(and(
+      eq(places.id, taskReference.placeId),
+      eq(places.status, 'active'),
+    )).for('update').limit(1);
+    if (!activePlace) return { kind: 'place_inactive' } as const;
     const [reviewTask] = await tx.select().from(communityReviewTasks).where(and(
       eq(communityReviewTasks.id, c.req.param('id')),
+      eq(communityReviewTasks.placeId, activePlace.id),
       or(eq(communityReviewTasks.status, 'pending_review'), eq(communityReviewTasks.status, 'conflicting')),
     )).for('update').limit(1);
     if (!reviewTask) return { kind: 'not_found' } as const;
+    if (reviewTask.targetType === 'observation') {
+      const [targetObservation] = await tx.select({
+        installationId: observations.installationId,
+        moderationStatus: observations.moderationStatus,
+        withdrawnAt: observations.withdrawnAt,
+      })
+        .from(observations).where(eq(observations.id, reviewTask.targetId)).limit(1);
+      if (!targetObservation || targetObservation.moderationStatus !== 'approved' || targetObservation.withdrawnAt) {
+        return { kind: 'target_unavailable' } as const;
+      }
+      if (targetObservation?.installationId === account.id) return { kind: 'original_author' } as const;
+    }
     const [existingVote] = await tx.select({ id: communityReviewVotes.id, mediaId: communityReviewVotes.mediaId })
       .from(communityReviewVotes)
       .where(and(
@@ -544,6 +717,7 @@ reviewTasksRouter.post('/:id/submissions', async (c) => {
       eq(locationProofs.id, parsed.data.location_proof_id),
       eq(locationProofs.installationId, account.id),
       eq(locationProofs.placeId, reviewTask.placeId),
+      eq(locationProofs.reviewTaskId, reviewTask.id),
       gt(locationProofs.expiresAt, now),
       isNull(locationProofs.consumedAt),
     )).returning())[0] : undefined;
@@ -621,6 +795,7 @@ reviewTasksRouter.post('/:id/submissions', async (c) => {
     await tx.insert(communityReviewVotes).values({
       reviewTaskId: reviewTask.id,
       installationId: account.id,
+      clientSubmissionId: parsed.data.submission_id,
       answer: parsed.data.answer,
       mediaId: media?.id ?? null,
       locationProofPassed: claimedProof?.passed ?? false,
@@ -632,6 +807,7 @@ reviewTasksRouter.post('/:id/submissions', async (c) => {
     }).onConflictDoUpdate({
       target: [communityReviewVotes.reviewTaskId, communityReviewVotes.installationId],
       set: {
+        clientSubmissionId: parsed.data.submission_id,
         answer: parsed.data.answer,
         mediaId: media?.id ?? null,
         locationProofPassed: claimedProof?.passed ?? false,
@@ -679,11 +855,33 @@ reviewTasksRouter.post('/:id/submissions', async (c) => {
     throw error;
   });
   if (outcome.kind === 'account_inactive') return fail(c, 409, 'ACCOUNT_NOT_ACTIVE', '匿名账户正在删除或已停用，无法提交复核');
+  if (outcome.kind === 'replayed') return ok(c, { vote_weight: outcome.voteWeight, consensus: outcome.consensus }, '复核结果已记录');
+  if (outcome.kind === 'place_inactive') return fail(c, 409, 'PLACE_NOT_ACTIVE', '地点已停用或合并，请刷新复核任务');
   if (outcome.kind === 'not_found') return fail(c, 404, 'REVIEW_TASK_NOT_FOUND', '复核任务不存在或已结束');
+  if (outcome.kind === 'target_unavailable') return fail(c, 409, 'REVIEW_TARGET_UNAVAILABLE', '原证据已撤回、未批准或不可用，复核任务已失效');
+  if (outcome.kind === 'original_author') return fail(c, 403, 'INDEPENDENT_REVIEW_REQUIRED', '原证据提交者不能参与自己的独立复核');
   if (outcome.kind === 'media_invalid') return fail(c, 409, 'MEDIA_REFERENCE_INVALID', '复核图片不存在、已过期或已被其他内容占用');
   if (outcome.kind === 'proof_invalid') return fail(c, 409, 'LOCATION_PROOF_INVALID', '位置证明不存在、已过期或已使用');
   return ok(c, { vote_weight: outcome.weighted.weight, consensus: toPublicConsensusSnapshot(outcome.result) }, '复核结果已记录');
 });
+
+function encodeReviewTaskCursor(createdAt: Date, id: string): string {
+  return Buffer.from(`${createdAt.toISOString()}|${id}`, 'utf8').toString('base64url');
+}
+
+function decodeReviewTaskCursor(value: string): { createdAt: Date; id: string } | undefined {
+  try {
+    const decoded = Buffer.from(value, 'base64url').toString('utf8');
+    const separator = decoded.indexOf('|');
+    if (separator <= 0) return undefined;
+    const createdAt = new Date(decoded.slice(0, separator));
+    const id = decoded.slice(separator + 1);
+    if (Number.isNaN(createdAt.getTime()) || !z.uuid().safeParse(id).success) return undefined;
+    return { createdAt, id };
+  } catch {
+    return undefined;
+  }
+}
 
 function haversineMeters(lat1: number, lon1: number, lat2: number, lon2: number): number {
   const radians = (value: number) => value * Math.PI / 180;

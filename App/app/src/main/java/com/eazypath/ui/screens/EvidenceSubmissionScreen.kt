@@ -4,9 +4,7 @@ import android.graphics.Rect
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
-import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -39,30 +37,20 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.layout.onSizeChanged
-import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.unit.IntOffset
-import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.eazypath.data.media.EvidenceImageAnalysis
 import com.google.gson.JsonPrimitive
+import com.eazypath.ui.components.EvidenceRedactionEditor
 import com.eazypath.ui.viewmodels.MainViewModel
-import kotlin.math.max
-import kotlin.math.min
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -211,7 +199,7 @@ fun EvidenceSubmissionScreen(viewModel: MainViewModel, onBack: () -> Unit) {
                             modifier = Modifier.fillMaxWidth(),
                         ) { Text("移除照片，仅提交现场描述") }
                         Text("检测到 ${analysis.faceCount} 个人脸区域、${analysis.sensitiveTextCount} 个疑似敏感文字区域。请检查建议框，并拖动补充遗漏区域。")
-                        RedactionEditor(analysis, regions) { newRegion ->
+                        EvidenceRedactionEditor(analysis, regions) { newRegion ->
                             invalidatePreview()
                             savedRegionValues = savedRegionValues + listOf(newRegion.left, newRegion.top, newRegion.right, newRegion.bottom)
                         }
@@ -277,59 +265,4 @@ fun EvidenceSubmissionScreen(viewModel: MainViewModel, onBack: () -> Unit) {
             Text("提交不等于认证。管理员审核或社区复核通过前，其他用户只会看到待审核状态。", color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
-}
-
-@Composable
-private fun RedactionEditor(analysis: EvidenceImageAnalysis, regions: List<Rect>, onRegionAdded: (Rect) -> Unit) {
-    var canvasSize by remember { mutableStateOf(IntSize.Zero) }
-    var dragStart by remember { mutableStateOf<Offset?>(null) }
-    var activeRect by remember { mutableStateOf<Rect?>(null) }
-    val bitmap = analysis.bitmap
-    Canvas(
-        Modifier.fillMaxWidth().height(300.dp)
-            .semantics { contentDescription = "脱敏区域编辑器，黑色区域将被马赛克，可在图片上拖动补充遮挡框" }
-            .onSizeChanged { canvasSize = it }
-            .pointerInput(analysis) {
-            detectDragGestures(
-                onDragStart = { offset -> dragStart = canvasToBitmap(offset, canvasSize, bitmap.width, bitmap.height) },
-                onDrag = { change, _ ->
-                    val start = dragStart ?: return@detectDragGestures
-                    val end = canvasToBitmap(change.position, canvasSize, bitmap.width, bitmap.height)
-                    activeRect = Rect(min(start.x, end.x).toInt(), min(start.y, end.y).toInt(), max(start.x, end.x).toInt(), max(start.y, end.y).toInt())
-                },
-                onDragEnd = {
-                    activeRect?.takeIf { it.width() >= 12 && it.height() >= 12 }?.let { onRegionAdded(Rect(it)) }
-                    activeRect = null
-                    dragStart = null
-                },
-                onDragCancel = { activeRect = null; dragStart = null },
-            )
-        },
-    ) {
-        val transform = fitTransform(canvasSize, bitmap.width, bitmap.height)
-        drawImage(bitmap.asImageBitmap(), dstOffset = IntOffset(transform.offsetX.toInt(), transform.offsetY.toInt()), dstSize = IntSize((bitmap.width * transform.scale).toInt(), (bitmap.height * transform.scale).toInt()))
-        (regions + listOfNotNull(activeRect)).forEach { rect ->
-            drawRect(
-                color = Color.Black.copy(alpha = 0.72f),
-                topLeft = Offset(transform.offsetX + rect.left * transform.scale, transform.offsetY + rect.top * transform.scale),
-                size = androidx.compose.ui.geometry.Size(rect.width() * transform.scale, rect.height() * transform.scale),
-            )
-        }
-    }
-}
-
-private data class ImageTransform(val scale: Float, val offsetX: Float, val offsetY: Float)
-
-private fun fitTransform(canvas: IntSize, bitmapWidth: Int, bitmapHeight: Int): ImageTransform {
-    if (canvas.width == 0 || canvas.height == 0) return ImageTransform(1f, 0f, 0f)
-    val scale = min(canvas.width.toFloat() / bitmapWidth, canvas.height.toFloat() / bitmapHeight)
-    return ImageTransform(scale, (canvas.width - bitmapWidth * scale) / 2f, (canvas.height - bitmapHeight * scale) / 2f)
-}
-
-private fun canvasToBitmap(offset: Offset, canvas: IntSize, bitmapWidth: Int, bitmapHeight: Int): Offset {
-    val transform = fitTransform(canvas, bitmapWidth, bitmapHeight)
-    return Offset(
-        ((offset.x - transform.offsetX) / transform.scale).coerceIn(0f, bitmapWidth.toFloat()),
-        ((offset.y - transform.offsetY) / transform.scale).coerceIn(0f, bitmapHeight.toFloat()),
-    )
 }

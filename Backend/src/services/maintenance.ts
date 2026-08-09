@@ -7,6 +7,7 @@ import {
   communityReviewTasks,
   db,
   evidenceMedia,
+  locationProofs,
   mediaUploadSessions,
   observationMedia,
   observations,
@@ -23,6 +24,7 @@ export async function cleanupExpiredMedia(): Promise<void> {
   await cleanupTemporaryVerificationFiles(now);
   await cleanupDeletingAccounts();
   await expireFeedbackRequests(now);
+  await db.delete(locationProofs).where(lte(locationProofs.expiresAt, now));
 
   const expiredUploads = await db.select().from(mediaUploadSessions).where(and(eq(mediaUploadSessions.status, 'uploading'), lte(mediaUploadSessions.expiresAt, now)));
   const removedUploadIds: string[] = [];

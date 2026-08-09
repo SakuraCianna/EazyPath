@@ -6,6 +6,9 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_LOCATION_EXTRA_COMMANDS" />
     <!-- 语音识别录音权限 -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <!-- 视觉验真相机拍照权限 -->
@@ -24,6 +27,9 @@
         <meta-data
             android:name="com.amap.api.v2.apikey"
             android:value="${AMAP_ANDROID_KEY}" />
+        <service
+            android:name="com.amap.api.location.APSService"
+            android:exported="false" />
         <activity
             android:name=".MainActivity"
             android:exported="true"

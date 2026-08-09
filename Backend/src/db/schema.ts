@@ -428,6 +428,7 @@ export const communityReviewVotes = pgTable(
     id: uuid('id').primaryKey().defaultRandom(),
     reviewTaskId: uuid('review_task_id').notNull().references(() => communityReviewTasks.id, { onDelete: 'cascade' }),
     installationId: uuid('installation_id').notNull().references(() => installationAccounts.id, { onDelete: 'cascade' }),
+    clientSubmissionId: uuid('client_submission_id').notNull(),
     answer: varchar('answer', { length: 16 }).notNull(),
     mediaId: uuid('media_id').references(() => evidenceMedia.id, { onDelete: 'set null' }),
     locationProofPassed: boolean('location_proof_passed').default(false).notNull(),
@@ -450,6 +451,7 @@ export const locationProofs = pgTable(
     id: uuid('id').primaryKey().defaultRandom(),
     installationId: uuid('installation_id').notNull().references(() => installationAccounts.id, { onDelete: 'cascade' }),
     placeId: uuid('place_id').notNull().references(() => places.id, { onDelete: 'cascade' }),
+    reviewTaskId: uuid('review_task_id').references(() => communityReviewTasks.id, { onDelete: 'cascade' }),
     passed: boolean('passed').notNull(),
     distanceBucket: varchar('distance_bucket', { length: 24 }).notNull(),
     expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
@@ -459,6 +461,7 @@ export const locationProofs = pgTable(
   (table) => [
     index('idx_location_proofs_owner_expiry').on(table.installationId, table.expiresAt),
     index('idx_location_proofs_place').on(table.placeId),
+    index('idx_location_proofs_review_task').on(table.reviewTaskId),
   ],
 );
 
