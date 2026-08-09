@@ -3,6 +3,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../auth/tokens.js', () => ({ revokeUserSessions: vi.fn() }));
 vi.mock('../db/index.js', () => ({
   auditEvents: {},
+  communityReviewTasks: {},
+  communityReviewVotes: {},
   evidenceMedia: {},
   installationAccounts: {},
   installationChallenges: {},
@@ -11,6 +13,7 @@ vi.mock('../db/index.js', () => ({
   userFeedback: {},
   db: {},
 }));
+vi.mock('./community-consensus.js', () => ({ recomputeCommunityConsensus: vi.fn() }));
 vi.mock('./media-storage.js', () => ({
   removeEvidenceFile: vi.fn(),
   removeUploadDirectory: vi.fn(),

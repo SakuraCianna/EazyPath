@@ -759,6 +759,30 @@
           "primaryKey": false,
           "notNull": false
         },
+        "resolution_reason": {
+          "name": "resolution_reason",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "resolved_by_admin_id": {
+          "name": "resolved_by_admin_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "resolved_at": {
+          "name": "resolved_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "superseded_by_task_id": {
+          "name": "superseded_by_task_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -810,6 +834,33 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
+        },
+        "idx_community_review_tasks_admin_queue": {
+          "name": "idx_community_review_tasks_admin_queue",
+          "columns": [
+            {
+              "expression": "status",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "updated_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {
@@ -838,12 +889,43 @@
           ],
           "onDelete": "no action",
           "onUpdate": "no action"
+        },
+        "community_review_tasks_resolved_by_admin_id_admin_users_id_fk": {
+          "name": "community_review_tasks_resolved_by_admin_id_admin_users_id_fk",
+          "tableFrom": "community_review_tasks",
+          "tableTo": "admin_users",
+          "columnsFrom": [
+            "resolved_by_admin_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "community_review_tasks_superseded_by_fk": {
+          "name": "community_review_tasks_superseded_by_fk",
+          "tableFrom": "community_review_tasks",
+          "tableTo": "community_review_tasks",
+          "columnsFrom": [
+            "superseded_by_task_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "chk_community_review_task_status": {
+          "name": "chk_community_review_task_status",
+          "value": "\"community_review_tasks\".\"status\" IN ('pending_review', 'community_consensus', 'conflicting', 'admin_rejected', 'cancelled', 'reopened')"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.community_review_votes": {
@@ -905,6 +987,13 @@
           "type": "numeric(3, 2)",
           "primaryKey": false,
           "notNull": true
+        },
+        "established": {
+          "name": "established",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
         },
         "suspended": {
           "name": "suspended",

@@ -1,7 +1,8 @@
-import { and, desc, eq, gt, gte, inArray, isNull, or, sql } from 'drizzle-orm';
+import { and, desc, eq, gt, gte, inArray, isNull, ne, or, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { z } from 'zod';
-import { calculateConsensus, calculateVoteWeight, type ReviewVoteInput } from '../domain/consensus.js';
+import { getEnv } from '../config/env.js';
+import { calculateVoteWeight, toPublicConsensusSnapshot, type ReviewVoteInput } from '../domain/consensus.js';
 import { canSubmitObservationAppeal, FEEDBACK_RESPONSE_WINDOW_MS } from '../domain/moderation.js';
 import {
   auditEvents,
@@ -23,6 +24,12 @@ import { fail, ok } from '../lib/api-response.js';
 import { requireUser } from '../middleware/auth.js';
 import { isFeatureValueCompatible } from '../domain/feature-values.js';
 import { lockCanonicalPlace, resolveActivePlace } from '../services/place-resolution.js';
+import {
+  CommunityReviewProtectionUnavailableError,
+  consumeCommunityReviewPermit,
+  fingerprintCommunityReviewSource,
+} from '../services/community-review-guard.js';
+import { recomputeCommunityConsensus } from '../services/community-consensus.js';
 import type { AppBindings } from '../types.js';
 
 const observationSchema = z.object({
@@ -48,6 +55,8 @@ const voteSchema = z.object({
   media_id: z.uuid().optional(),
   location_proof_id: z.uuid().optional(),
 });
+
+const COMMUNITY_REVIEW_MEDIA_RETENTION_MS = 180 * 24 * 60 * 60 * 1000;
 
 const appealSchema = z.object({
   message: z.string().trim().min(6).max(2000),
@@ -489,82 +498,192 @@ reviewTasksRouter.get('/', async (c) => {
 });
 
 reviewTasksRouter.post('/:id/submissions', async (c) => {
+  if (!z.uuid().safeParse(c.req.param('id')).success) return fail(c, 422, 'REVIEW_TASK_ID_INVALID', '复核任务 ID 无效');
   const parsed = voteSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return fail(c, 422, 'REVIEW_VOTE_INVALID', '复核结果无效');
-  const [reviewTask] = await db.select().from(communityReviewTasks).where(and(eq(communityReviewTasks.id, c.req.param('id')), or(eq(communityReviewTasks.status, 'pending_review'), eq(communityReviewTasks.status, 'conflicting')))).limit(1);
-  if (!reviewTask) return fail(c, 404, 'REVIEW_TASK_NOT_FOUND', '复核任务不存在或已结束');
-  const [account] = await db.select().from(installationAccounts).where(eq(installationAccounts.id, c.get('installationId'))).limit(1);
-  if (!account) return fail(c, 401, 'AUTH_TOKEN_INVALID', '安装账户无效');
-
-  const media = parsed.data.media_id ? (await db.select().from(evidenceMedia).where(and(eq(evidenceMedia.id, parsed.data.media_id), eq(evidenceMedia.installationId, account.id), eq(evidenceMedia.status, 'linked'), isNull(evidenceMedia.deletedAt))).limit(1))[0] : undefined;
-  if (parsed.data.media_id && !media) return fail(c, 422, 'MEDIA_REFERENCE_INVALID', '复核图片不存在或尚未关联');
-  const proof = parsed.data.location_proof_id ? (await db.select().from(locationProofs).where(and(eq(locationProofs.id, parsed.data.location_proof_id), eq(locationProofs.installationId, account.id), eq(locationProofs.placeId, reviewTask.placeId), gt(locationProofs.expiresAt, new Date()), isNull(locationProofs.consumedAt))).limit(1))[0] : undefined;
-  if (parsed.data.location_proof_id && !proof) return fail(c, 422, 'LOCATION_PROOF_INVALID', '位置证明不存在、已过期或已使用');
-
-  const voteInput: ReviewVoteInput = {
-    installationId: account.id,
-    answer: parsed.data.answer,
-    submittedAt: new Date(),
-    accountCreatedAt: account.createdAt,
-    hasAcceptedHistory: account.acceptedContributionCount > 0,
-    hasConfirmedRedactedMedia: Boolean(media?.redactionConfirmed),
-    locationProofPassed: proof?.passed ?? false,
-    suspended: account.status !== 'active',
-  };
-  const weighted = calculateVoteWeight(voteInput);
-  await db.insert(communityReviewVotes).values({
-    reviewTaskId: reviewTask.id,
-    installationId: account.id,
-    answer: parsed.data.answer,
-    mediaId: media?.id,
-    locationProofPassed: proof?.passed ?? false,
-    locationDistanceBucket: proof?.distanceBucket,
-    baseWeight: String(media ? proof?.passed ? 1 : 0.8 : 0.5),
-    finalWeight: String(weighted.weight),
-    suspended: weighted.suspended,
-  }).onConflictDoUpdate({
-    target: [communityReviewVotes.reviewTaskId, communityReviewVotes.installationId],
-    set: {
+  const env = getEnv();
+  const realIp = c.req.header('x-real-ip');
+  const forwardedFor = c.req.header('x-forwarded-for');
+  const sourceFingerprint = fingerprintCommunityReviewSource({
+    trustProxy: env.TRUST_PROXY,
+    ...(realIp ? { realIp } : {}),
+    ...(forwardedFor ? { forwardedFor } : {}),
+  }, env.AUTH_TOKEN_SECRET);
+  let permit;
+  try {
+    permit = await consumeCommunityReviewPermit(c.get('installationId'), sourceFingerprint);
+  } catch (error) {
+    if (error instanceof CommunityReviewProtectionUnavailableError) {
+      return fail(c, 503, 'COMMUNITY_REVIEW_PROTECTION_UNAVAILABLE', '社区复核保护暂不可用，请稍后重试', { retryable: true });
+    }
+    throw error;
+  }
+  if (!permit.allowed) {
+    c.header('Retry-After', String(permit.retryAfterSeconds));
+    return fail(c, 429, 'COMMUNITY_REVIEW_RATE_LIMITED', '复核提交过于频繁，请稍后再试', { retryable: true });
+  }
+  const outcome = await db.transaction(async (tx) => {
+    const now = new Date();
+    const [account] = await tx.select().from(installationAccounts)
+      .where(eq(installationAccounts.id, c.get('installationId'))).for('update').limit(1);
+    if (!account || account.status !== 'active') return { kind: 'account_inactive' } as const;
+    const [reviewTask] = await tx.select().from(communityReviewTasks).where(and(
+      eq(communityReviewTasks.id, c.req.param('id')),
+      or(eq(communityReviewTasks.status, 'pending_review'), eq(communityReviewTasks.status, 'conflicting')),
+    )).for('update').limit(1);
+    if (!reviewTask) return { kind: 'not_found' } as const;
+    const [existingVote] = await tx.select({ id: communityReviewVotes.id, mediaId: communityReviewVotes.mediaId })
+      .from(communityReviewVotes)
+      .where(and(
+        eq(communityReviewVotes.reviewTaskId, reviewTask.id),
+        eq(communityReviewVotes.installationId, account.id),
+      ))
+      .for('update')
+      .limit(1);
+    const claimedProof = parsed.data.location_proof_id ? (await tx.update(locationProofs).set({ consumedAt: now }).where(and(
+      eq(locationProofs.id, parsed.data.location_proof_id),
+      eq(locationProofs.installationId, account.id),
+      eq(locationProofs.placeId, reviewTask.placeId),
+      gt(locationProofs.expiresAt, now),
+      isNull(locationProofs.consumedAt),
+    )).returning())[0] : undefined;
+    if (parsed.data.location_proof_id && !claimedProof) throw new CommunityConflictError('LOCATION_PROOF_ALREADY_USED');
+    const media = parsed.data.media_id
+      ? existingVote?.mediaId === parsed.data.media_id
+        ? (await tx.select().from(evidenceMedia).where(and(
+            eq(evidenceMedia.id, parsed.data.media_id),
+            eq(evidenceMedia.installationId, account.id),
+            eq(evidenceMedia.status, 'linked'),
+            eq(evidenceMedia.redactionConfirmed, true),
+            or(isNull(evidenceMedia.expiresAt), gt(evidenceMedia.expiresAt, now)),
+            isNull(evidenceMedia.deletedAt),
+          )).limit(1))[0]
+        : (await tx.update(evidenceMedia).set({
+            status: 'linked',
+            linkedAt: now,
+            expiresAt: new Date(now.getTime() + COMMUNITY_REVIEW_MEDIA_RETENTION_MS),
+            updatedAt: now,
+          }).where(and(
+            eq(evidenceMedia.id, parsed.data.media_id),
+            eq(evidenceMedia.installationId, account.id),
+            eq(evidenceMedia.status, 'pending_link'),
+            eq(evidenceMedia.redactionConfirmed, true),
+            gt(evidenceMedia.expiresAt, now),
+            isNull(evidenceMedia.deletedAt),
+          )).returning())[0]
+      : undefined;
+    if (parsed.data.media_id && !media) throw new CommunityConflictError('MEDIA_ALREADY_LINKED');
+    if (existingVote?.mediaId && existingVote.mediaId !== media?.id) {
+      const [observationReference] = await tx.select({ id: observationMedia.observationId }).from(observationMedia)
+        .where(eq(observationMedia.mediaId, existingVote.mediaId)).limit(1);
+      const [otherVoteReference] = await tx.select({ id: communityReviewVotes.id }).from(communityReviewVotes).where(and(
+        eq(communityReviewVotes.mediaId, existingVote.mediaId),
+        ne(communityReviewVotes.id, existingVote.id),
+      )).limit(1);
+      if (!observationReference && !otherVoteReference) {
+        await tx.update(evidenceMedia).set({ status: 'withdrawn', expiresAt: now, updatedAt: now }).where(and(
+          eq(evidenceMedia.id, existingVote.mediaId),
+          eq(evidenceMedia.installationId, account.id),
+          isNull(evidenceMedia.deletedAt),
+        ));
+      }
+    }
+    const duplicateMediaVotes = media?.fingerprintHmac
+      ? await tx.select({ id: communityReviewVotes.id }).from(communityReviewVotes)
+          .innerJoin(evidenceMedia, eq(communityReviewVotes.mediaId, evidenceMedia.id))
+          .where(and(
+            eq(communityReviewVotes.reviewTaskId, reviewTask.id),
+            ne(communityReviewVotes.installationId, account.id),
+            eq(evidenceMedia.fingerprintHmac, media.fingerprintHmac),
+            isNull(evidenceMedia.deletedAt),
+          ))
+      : [];
+    if (duplicateMediaVotes.length > 0) {
+      await tx.update(communityReviewVotes).set({ suspended: true, updatedAt: now })
+        .where(inArray(communityReviewVotes.id, duplicateMediaVotes.map((vote) => vote.id)));
+    }
+    const riskFlags = [
+      ...(permit.suspiciousSource ? ['high_source_installation_churn'] : []),
+      ...(duplicateMediaVotes.length > 0 ? ['duplicate_media'] : []),
+    ];
+    const suspended = riskFlags.length > 0;
+    const voteInput: ReviewVoteInput = {
+      installationId: account.id,
       answer: parsed.data.answer,
-      mediaId: media?.id,
-      locationProofPassed: proof?.passed ?? false,
-      locationDistanceBucket: proof?.distanceBucket,
-      baseWeight: String(media ? proof?.passed ? 1 : 0.8 : 0.5),
+      submittedAt: now,
+      accountCreatedAt: account.createdAt,
+      hasAcceptedHistory: account.acceptedContributionCount > 0,
+      hasConfirmedRedactedMedia: Boolean(media?.redactionConfirmed),
+      locationProofPassed: claimedProof?.passed ?? false,
+      suspended,
+    };
+    const weighted = calculateVoteWeight(voteInput);
+    await tx.insert(communityReviewVotes).values({
+      reviewTaskId: reviewTask.id,
+      installationId: account.id,
+      answer: parsed.data.answer,
+      mediaId: media?.id ?? null,
+      locationProofPassed: claimedProof?.passed ?? false,
+      locationDistanceBucket: claimedProof?.distanceBucket ?? null,
+      baseWeight: String(media ? claimedProof?.passed ? 1 : 0.8 : 0.5),
       finalWeight: String(weighted.weight),
-      suspended: weighted.suspended,
-      updatedAt: new Date(),
-    },
+      established: weighted.established,
+      suspended,
+    }).onConflictDoUpdate({
+      target: [communityReviewVotes.reviewTaskId, communityReviewVotes.installationId],
+      set: {
+        answer: parsed.data.answer,
+        mediaId: media?.id ?? null,
+        locationProofPassed: claimedProof?.passed ?? false,
+        locationDistanceBucket: claimedProof?.distanceBucket ?? null,
+        baseWeight: String(media ? claimedProof?.passed ? 1 : 0.8 : 0.5),
+        finalWeight: String(weighted.weight),
+        established: weighted.established,
+        suspended,
+        updatedAt: now,
+      },
+    });
+    const result = await recomputeCommunityConsensus(tx, reviewTask.id);
+    await tx.update(communityReviewTasks).set({
+      status: result.status,
+      consensusOutcome: result.outcome,
+      consensusSnapshot: toPublicConsensusSnapshot(result),
+      updatedAt: now,
+    }).where(eq(communityReviewTasks.id, reviewTask.id));
+    if (reviewTask.targetType === 'observation') {
+      if (result.status === 'community_consensus' && result.outcome === 'present') {
+        await tx.update(observations).set({
+          freshnessStatus: 'current', evidenceGrade: 'B', expiresAt: new Date(now.getTime() + 90 * 24 * 60 * 60 * 1000), updatedAt: now,
+        }).where(and(eq(observations.id, reviewTask.targetId), eq(observations.moderationStatus, 'approved'), isNull(observations.withdrawnAt)));
+      } else if (result.status === 'community_consensus' || result.status === 'conflicting') {
+        await tx.update(observations).set({
+          freshnessStatus: result.status === 'conflicting' ? 'conflicting' : 'expired', evidenceGrade: 'U', expiresAt: now, updatedAt: now,
+        }).where(and(eq(observations.id, reviewTask.targetId), eq(observations.moderationStatus, 'approved'), isNull(observations.withdrawnAt)));
+      }
+    }
+    await tx.insert(auditEvents).values({
+      actorType: 'installation', actorId: account.id, action: 'community_review.submitted', targetType: 'community_review_task', targetId: reviewTask.id,
+      metadata: {
+        status: result.status,
+        outcome: result.outcome,
+        vote_weight: weighted.weight,
+        policy_version: result.snapshot.version,
+        risk_flags: riskFlags,
+      },
+      requestId: c.get('requestId'),
+    });
+    return { kind: 'recorded', weighted, result } as const;
+  }).catch((error: unknown) => {
+    if (error instanceof CommunityConflictError && error.code === 'MEDIA_ALREADY_LINKED') return { kind: 'media_invalid' } as const;
+    if (error instanceof CommunityConflictError && error.code === 'LOCATION_PROOF_ALREADY_USED') return { kind: 'proof_invalid' } as const;
+    throw error;
   });
-  if (proof) await db.update(locationProofs).set({ consumedAt: new Date() }).where(eq(locationProofs.id, proof.id));
-
-  const result = await recomputeConsensus(reviewTask.id);
-  await db.update(communityReviewTasks).set({ status: result.status, consensusOutcome: result.outcome, consensusSnapshot: result, updatedAt: new Date() }).where(eq(communityReviewTasks.id, reviewTask.id));
-  await db.insert(auditEvents).values({ actorType: 'installation', actorId: account.id, action: 'community_review.submitted', targetType: 'community_review_task', targetId: reviewTask.id, metadata: { status: result.status }, requestId: c.get('requestId') });
-  return ok(c, { vote_weight: weighted.weight, consensus: result }, '复核结果已记录');
+  if (outcome.kind === 'account_inactive') return fail(c, 409, 'ACCOUNT_NOT_ACTIVE', '匿名账户正在删除或已停用，无法提交复核');
+  if (outcome.kind === 'not_found') return fail(c, 404, 'REVIEW_TASK_NOT_FOUND', '复核任务不存在或已结束');
+  if (outcome.kind === 'media_invalid') return fail(c, 409, 'MEDIA_REFERENCE_INVALID', '复核图片不存在、已过期或已被其他内容占用');
+  if (outcome.kind === 'proof_invalid') return fail(c, 409, 'LOCATION_PROOF_INVALID', '位置证明不存在、已过期或已使用');
+  return ok(c, { vote_weight: outcome.weighted.weight, consensus: toPublicConsensusSnapshot(outcome.result) }, '复核结果已记录');
 });
-
-async function recomputeConsensus(reviewTaskId: string) {
-  const rows = await db.select({
-    installationId: communityReviewVotes.installationId,
-    answer: communityReviewVotes.answer,
-    submittedAt: communityReviewVotes.updatedAt,
-    accountCreatedAt: installationAccounts.createdAt,
-    acceptedCount: installationAccounts.acceptedContributionCount,
-    mediaConfirmed: evidenceMedia.redactionConfirmed,
-    locationProofPassed: communityReviewVotes.locationProofPassed,
-    suspended: communityReviewVotes.suspended,
-  }).from(communityReviewVotes).innerJoin(installationAccounts, eq(communityReviewVotes.installationId, installationAccounts.id)).leftJoin(evidenceMedia, eq(communityReviewVotes.mediaId, evidenceMedia.id)).where(eq(communityReviewVotes.reviewTaskId, reviewTaskId));
-  return calculateConsensus(rows.map((row) => ({
-    installationId: row.installationId,
-    answer: row.answer as 'present' | 'absent' | 'unknown',
-    submittedAt: row.submittedAt,
-    accountCreatedAt: row.accountCreatedAt,
-    hasAcceptedHistory: row.acceptedCount > 0,
-    hasConfirmedRedactedMedia: row.mediaConfirmed ?? false,
-    locationProofPassed: row.locationProofPassed,
-    suspended: row.suspended,
-  })));
-}
 
 function haversineMeters(lat1: number, lon1: number, lat2: number, lon2: number): number {
   const radians = (value: number) => value * Math.PI / 180;
