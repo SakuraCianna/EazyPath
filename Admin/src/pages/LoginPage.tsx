@@ -5,6 +5,11 @@ import styles from './LoginPage.module.css';
 
 export function LoginPage() {
   const { login } = useAuth();
+  const [notice] = useState(() => {
+    const value = sessionStorage.getItem('eazypath_admin_notice');
+    sessionStorage.removeItem('eazypath_admin_notice');
+    return value;
+  });
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -26,11 +31,12 @@ export function LoginPage() {
         <form className={styles.form} onSubmit={submit}>
           <div className={styles.formIcon}><LockKeyhole /></div>
           <p className={styles.eyebrow}>管理员安全入口</p><h2 id="login-title">登录管理后台</h2><p className={styles.help}>账号由部署引导或超级管理员创建。</p>
+          {notice && <div className={styles.notice} role="status">{notice}</div>}
           <label>用户名<input autoComplete="username" value={username} onChange={(event) => setUsername(event.target.value)} required /></label>
           <label>密码<input type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} required /></label>
           {error && <div className={styles.error} role="alert">{error}</div>}
           <button type="submit" disabled={loading}>{loading ? '正在验证…' : <>安全登录<ArrowRight size={18} /></>}</button>
-          <small>连续失败 5 次将锁定 15 分钟，所有登录行为都会进入审计日志。</small>
+          <small>登录入口启用来源限流、并发保护和统一失败响应，所有安全事件都会进入审计日志。</small>
         </form>
       </section>
     </main>

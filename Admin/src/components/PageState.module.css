@@ -1,5 +1,5 @@
-.state { min-height: 230px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; color: var(--color-text-muted); text-align: center; padding: 32px; }
+.state { min-height: 230px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; color: var(--color-on-surface-variant); text-align: center; padding: 32px; }
 .state svg { color: var(--color-outline); width: 34px; height: 34px; }.state strong { color: var(--color-text); }.state span { font-size: 13px; }
-.state button { margin-top: 8px; display: flex; align-items: center; gap: 8px; border: 0; border-radius: 14px; padding: 0 18px; background: var(--color-primary); color: white; font-weight: 700; }
+.state button { margin-top: 8px; padding: 0 18px; display: flex; align-items: center; gap: 8px; border: 0; border-radius: 15px 15px 5px 15px; background: var(--color-primary); color: var(--color-on-primary); font-weight: 700; }
 .spinner { width: 30px; height: 30px; border: 3px solid var(--color-primary-container); border-top-color: var(--color-primary); border-radius: 50%; animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
