@@ -1,7 +1,10 @@
 import { AlertTriangle, Bot, CheckCircle2, Clock3, Database, ExternalLink, Image, MapPinned, RefreshCw, Server, Users } from 'lucide-react';
+import { Link } from 'react-router-dom';
 import { formatDate } from '../api/client';
+import { useAuth } from '../auth/AuthContext';
 import { PageState } from '../components/PageState';
 import { useApiData } from '../hooks/useApiData';
+import type { ObservationReviewItem, Paginated } from '../types/reviews';
 import styles from './DashboardPage.module.css';
 
 interface DashboardData {
@@ -9,11 +12,6 @@ interface DashboardData {
   metrics: { pending_evidence: number; pending_reviews: number; failed_tasks: number; expiring_evidence: number };
   queue: Record<string, number>;
   sources: Array<{ id: string; label: string; configured: boolean }>;
-}
-
-interface ReviewRow {
-  observation: { id: string; evidenceSource: string; moderationStatus: string; evidenceGrade: string; createdAt: string; expiresAt?: string };
-  placeName: string;
 }
 
 const metricDefinitions = [
@@ -24,8 +22,10 @@ const metricDefinitions = [
 ] as const;
 
 export function DashboardPage() {
+  const { hasPermission } = useAuth();
+  const canReadReviews = hasPermission('reviews.read');
   const dashboard = useApiData<DashboardData>('/api/v1/admin/dashboard');
-  const reviews = useApiData<ReviewRow[]>('/api/v1/admin/reviews');
+  const reviews = useApiData<Paginated<ObservationReviewItem>>('/api/v1/admin/reviews/observations?status=pending&limit=7&offset=0', canReadReviews);
   if (dashboard.loading || dashboard.error || !dashboard.data) return <PageState loading={dashboard.loading} error={dashboard.error} onRetry={dashboard.reload} />;
   const data = dashboard.data;
   return (
@@ -36,9 +36,9 @@ export function DashboardPage() {
       </section>
       <section className={styles.mainGrid}>
         <article className={styles.coverage}>
-          <div className={styles.sectionTitle}><div><MapPinned /><span><strong>江西无障碍证据覆盖</strong><small>地点与观测图层</small></span></div><a href="/places">管理地点<ExternalLink size={16} /></a></div>
-          <div className={styles.coverageEmpty}><div className={styles.mapGrid} aria-hidden="true" /><MapPinned /><strong>等待地点与证据数据</strong><span>接入高德地点并产生已审核观测后，这里将展示真实覆盖。不会绘制模拟标记。</span></div>
-          <div className={styles.legend}><span><i className={styles.ramp} />坡道证据</span><span><i className={styles.elevator} />电梯证据</span><span><i className={styles.risk} />台阶风险</span></div>
+          <div className={styles.sectionTitle}><div><MapPinned /><span><strong>江西证据覆盖准备度</strong><small>真实地点与审核观测</small></span></div>{hasPermission('places.read') && <Link to="/places">管理地点<ExternalLink size={16} /></Link>}</div>
+          <div className={styles.coverageEmpty}><span className={styles.coverageOrb}><MapPinned /></span><strong>只在真实数据到达后绘制覆盖</strong><span>当前总览 API 尚未返回聚合地图数据，因此这里明确保持未知。地点与已审核观测可在对应页面查看，不会绘制模拟标记。</span></div>
+          <div className={styles.legend}><span><i className={styles.ramp} />真实地点</span><span><i className={styles.elevator} />已审证据</span><span><i className={styles.risk} />未知风险</span></div>
         </article>
         <article className={styles.health}>
           <div className={styles.sectionTitle}><div><Server /><span><strong>数据源配置</strong><small>密钥值不会显示</small></span></div></div>
@@ -47,8 +47,8 @@ export function DashboardPage() {
       </section>
       <section className={styles.bottomGrid}>
         <article className={styles.tableCard}>
-          <div className={styles.sectionTitle}><div><Image /><span><strong>证据审核队列</strong><small>最近提交的现场观测</small></span></div><a href="/reviews">查看全部<ExternalLink size={16} /></a></div>
-          {reviews.loading || reviews.error || !reviews.data || reviews.data.length === 0 ? <PageState loading={reviews.loading} error={reviews.error} empty={reviews.data?.length === 0} onRetry={reviews.reload} /> : <div className={styles.tableScroll}><table><thead><tr><th>地点</th><th>来源</th><th>状态</th><th>等级</th><th>提交时间</th></tr></thead><tbody>{reviews.data.slice(0, 7).map((row) => <tr key={row.observation.id}><td>{row.placeName}</td><td>{row.observation.evidenceSource}</td><td><span className={styles.status}>{row.observation.moderationStatus}</span></td><td>{row.observation.evidenceGrade}</td><td>{formatDate(row.observation.createdAt)}</td></tr>)}</tbody></table></div>}
+          <div className={styles.sectionTitle}><div><Image /><span><strong>证据审核队列</strong><small>最近提交的现场观测</small></span></div>{canReadReviews && <Link to="/reviews">查看全部<ExternalLink size={16} /></Link>}</div>
+          {!canReadReviews ? <div className={styles.tableUnavailable}>当前角色没有现场证据读取权限。</div> : reviews.loading || reviews.error || !reviews.data || reviews.data.items.length === 0 ? <PageState loading={reviews.loading} error={reviews.error} empty={reviews.data?.items.length === 0} onRetry={reviews.reload} /> : <div className={styles.tableScroll}><table><thead><tr><th>地点</th><th>字段</th><th>状态</th><th>等级</th><th>提交时间</th></tr></thead><tbody>{reviews.data.items.map((row) => <tr key={row.id}><td>{row.placeName}</td><td>{row.featureName}</td><td><span className={styles.status}>{row.moderationStatus}</span></td><td>{row.evidenceGrade}</td><td>{formatDate(row.createdAt)}</td></tr>)}</tbody></table></div>}
         </article>
         <article className={styles.queueCard}>
           <div className={styles.sectionTitle}><div><ListIcon /><span><strong>BullMQ 任务状态</strong><small>eazypath-agent-tasks</small></span></div></div>

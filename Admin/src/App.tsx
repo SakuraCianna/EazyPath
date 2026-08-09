@@ -8,10 +8,15 @@ import { ReviewsPage } from './pages/ReviewsPage';
 import { PlatformLinksPage } from './pages/PlatformLinksPage';
 import { OperationalListPage } from './pages/OperationalListPage';
 import { SettingsPage } from './pages/SettingsPage';
+import { AdminAccessPage } from './pages/AdminAccessPage';
+import { AccountSecurityPage } from './pages/AccountSecurityPage';
 
 export function App() {
-  const { username } = useAuth();
-  if (!username) {
+  const { identity, loading } = useAuth();
+  if (loading) {
+    return <div className="appBoot" role="status"><span className="appBootMark" aria-hidden="true" />正在验证管理会话…</div>;
+  }
+  if (!identity) {
     return <Routes><Route path="*" element={<LoginPage />} /></Routes>;
   }
   return (
@@ -21,13 +26,14 @@ export function App() {
         <Route path="places" element={<PlacesPage />} />
         <Route path="reviews" element={<ReviewsPage />} />
         <Route path="community" element={<OperationalListPage kind="community" />} />
-        <Route path="verifications" element={<OperationalListPage kind="verifications" />} />
+        <Route path="verifications" element={<Navigate to="/reviews?queue=verifications" replace />} />
         <Route path="users" element={<OperationalListPage kind="users" />} />
         <Route path="tasks" element={<OperationalListPage kind="tasks" />} />
         <Route path="platform-links" element={<PlatformLinksPage />} />
         <Route path="media" element={<OperationalListPage kind="media" />} />
-        <Route path="admin-users" element={<OperationalListPage kind="adminUsers" />} />
+        <Route path="admin-users" element={<AdminAccessPage />} />
         <Route path="audit" element={<OperationalListPage kind="audit" />} />
+        <Route path="account-security" element={<AccountSecurityPage />} />
         <Route path="settings" element={<SettingsPage />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />

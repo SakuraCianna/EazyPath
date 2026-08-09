@@ -1,52 +1,17 @@
-* {
-  box-sizing: border-box;
-}
-
-html {
-  min-width: 320px;
-  background: var(--color-surface);
-  font-family: var(--font-sans);
-  color: var(--color-text);
-}
-
-body {
-  margin: 0;
-  min-width: 320px;
-  min-height: 100vh;
-  background: var(--color-surface);
-}
-
-button,
-input,
-select,
-textarea {
-  font: inherit;
-}
-
-button,
-a,
-input,
-select,
-textarea {
-  outline: none;
-}
-
-button:focus-visible,
-a:focus-visible,
-input:focus-visible,
-select:focus-visible,
-textarea:focus-visible {
-  box-shadow: var(--focus-ring);
-}
-
-button {
-  min-height: 44px;
-}
-
-a {
-  color: inherit;
-}
-
-::selection {
-  background: var(--color-primary-container);
-}
+* { box-sizing: border-box; }
+html { min-width: 320px; background: var(--color-surface); color: var(--color-on-surface); font-family: var(--font-sans); font-synthesis: none; }
+body { margin: 0; min-width: 320px; min-height: 100vh; background: var(--color-surface); }
+button,input,select,textarea { font: inherit; }
+button,a,input,select,textarea { outline: none; }
+button { min-height: 48px; cursor: pointer; }
+button:disabled { cursor: not-allowed; }
+a { color: inherit; }
+button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,[tabindex]:focus-visible { box-shadow: var(--focus-ring); }
+input::placeholder,textarea::placeholder { color: color-mix(in srgb, var(--color-on-surface-variant) 70%, transparent); }
+::selection { background: var(--color-primary-container); color: var(--color-on-primary-container); }
+.appBoot { min-height: 100vh; display: grid; place-content: center; justify-items: center; gap: 14px; color: var(--color-on-surface-variant); font-size: 13px; }
+.appBootMark { width: 52px; height: 52px; border: 5px solid var(--color-primary-container); border-top-color: var(--color-primary); border-radius: 44% 56% 58% 42%; animation: bootSpin 900ms linear infinite; }
+@keyframes bootSpin { to { transform: rotate(360deg); } }
+html body button[class],html body button:not([class]) { min-width: 48px; min-height: 48px; }
+html body input:not([type="checkbox"]):not([type="radio"]),html body select:not([multiple]) { min-height: 48px; }
+@media (prefers-reduced-motion: reduce) { *,*::before,*::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; } }
