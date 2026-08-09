@@ -106,6 +106,7 @@ CREATE TABLE "community_review_votes" (
 	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
 	"review_task_id" uuid NOT NULL,
 	"installation_id" uuid NOT NULL,
+	"client_submission_id" uuid NOT NULL,
 	"answer" varchar(16) NOT NULL,
 	"media_id" uuid,
 	"location_proof_passed" boolean DEFAULT false NOT NULL,
@@ -190,6 +191,7 @@ CREATE TABLE "location_proofs" (
 	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
 	"installation_id" uuid NOT NULL,
 	"place_id" uuid NOT NULL,
+	"review_task_id" uuid,
 	"passed" boolean NOT NULL,
 	"distance_bucket" varchar(24) NOT NULL,
 	"expires_at" timestamp with time zone NOT NULL,
@@ -379,6 +381,7 @@ ALTER TABLE "facilities" ADD CONSTRAINT "facilities_place_id_places_id_fk" FOREI
 ALTER TABLE "facilities" ADD CONSTRAINT "facilities_place_unit_id_place_units_id_fk" FOREIGN KEY ("place_unit_id") REFERENCES "public"."place_units"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "location_proofs" ADD CONSTRAINT "location_proofs_installation_id_installation_accounts_id_fk" FOREIGN KEY ("installation_id") REFERENCES "public"."installation_accounts"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "location_proofs" ADD CONSTRAINT "location_proofs_place_id_places_id_fk" FOREIGN KEY ("place_id") REFERENCES "public"."places"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "location_proofs" ADD CONSTRAINT "location_proofs_review_task_id_community_review_tasks_id_fk" FOREIGN KEY ("review_task_id") REFERENCES "public"."community_review_tasks"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "media_upload_parts" ADD CONSTRAINT "media_upload_parts_upload_id_media_upload_sessions_id_fk" FOREIGN KEY ("upload_id") REFERENCES "public"."media_upload_sessions"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "media_upload_sessions" ADD CONSTRAINT "media_upload_sessions_installation_id_installation_accounts_id_fk" FOREIGN KEY ("installation_id") REFERENCES "public"."installation_accounts"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "media_upload_sessions" ADD CONSTRAINT "media_upload_sessions_completed_media_id_evidence_media_id_fk" FOREIGN KEY ("completed_media_id") REFERENCES "public"."evidence_media"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
@@ -417,6 +420,7 @@ CREATE UNIQUE INDEX "uq_installation_accounts_guid" ON "installation_accounts" U
 CREATE INDEX "idx_installation_challenges_guid" ON "installation_challenges" USING btree ("installation_guid","expires_at");--> statement-breakpoint
 CREATE INDEX "idx_location_proofs_owner_expiry" ON "location_proofs" USING btree ("installation_id","expires_at");--> statement-breakpoint
 CREATE INDEX "idx_location_proofs_place" ON "location_proofs" USING btree ("place_id");--> statement-breakpoint
+CREATE INDEX "idx_location_proofs_review_task" ON "location_proofs" USING btree ("review_task_id");--> statement-breakpoint
 CREATE UNIQUE INDEX "uq_media_upload_sessions_idempotency" ON "media_upload_sessions" USING btree ("installation_id","idempotency_key");--> statement-breakpoint
 CREATE INDEX "idx_media_upload_sessions_expiry" ON "media_upload_sessions" USING btree ("status","expires_at");--> statement-breakpoint
 CREATE INDEX "idx_observations_place_feature" ON "observations" USING btree ("place_id","feature_definition_id","moderation_status","freshness_status","expires_at");--> statement-breakpoint

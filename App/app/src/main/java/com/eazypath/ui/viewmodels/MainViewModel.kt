@@ -8,14 +8,17 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.eazypath.data.EazyPathRepository
+import com.eazypath.data.ApiException
 import com.eazypath.data.media.EvidenceImageAnalysis
 import com.eazypath.data.media.PreparedEvidence
 import com.eazypath.data.network.FeatureDefinition
 import com.eazypath.data.network.InteractionProfile
+import com.eazypath.data.network.LocationProofData
 import com.eazypath.data.network.MobilityProfile
 import com.eazypath.data.network.PlaceSearchItem
 import com.eazypath.data.network.ProfileData
 import com.eazypath.data.network.ReviewTask
+import com.eazypath.data.network.ReviewSubmissionData
 import com.eazypath.data.network.TaskDetails
 import com.eazypath.data.network.VerificationDetails
 import com.google.gson.JsonElement
@@ -30,6 +33,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.UUID
 
 data class MainUiState(
     val sessionReady: Boolean = false,
@@ -46,7 +50,17 @@ data class MainUiState(
     val verificationError: String? = null,
     val reviewTasks: List<ReviewTask> = emptyList(),
     val reviewsLoading: Boolean = false,
+    val reviewsLoadingMore: Boolean = false,
+    val reviewTasksNextCursor: String? = null,
     val reviewsError: String? = null,
+    val reviewDraftTaskId: String? = null,
+    val reviewLocationProof: LocationProofData? = null,
+    val reviewLocationLoadingTaskId: String? = null,
+    val reviewSubmittingTaskId: String? = null,
+    val reviewNotice: String? = null,
+    val reviewSubmission: ReviewSubmissionData? = null,
+    val reviewPendingSubmissionId: String? = null,
+    val reviewSubmissionVersion: Int = 0,
     val placeResults: List<PlaceSearchItem> = emptyList(),
     val evidenceFeatureDefinitions: List<FeatureDefinition> = emptyList(),
     val evidenceFeaturesLoading: Boolean = false,
@@ -67,10 +81,13 @@ class MainViewModel(private val repository: EazyPathRepository) : ViewModel() {
     val state: StateFlow<MainUiState> = _state.asStateFlow()
     private var taskEventsJob: Job? = null
     private var placeSearchJob: Job? = null
+    private var reviewLocationJob: Job? = null
+    private var reviewSubmitJob: Job? = null
     private var evidenceImageJob: Job? = null
     private var evidenceSubmitJob: Job? = null
     private var evidenceImageGeneration: Long = 0
     private var evidenceSubmitGeneration: Long = 0
+    private var reviewGeneration: Long = 0
     private var activePrompt: String? = null
 
     init {
@@ -134,21 +151,187 @@ class MainViewModel(private val repository: EazyPathRepository) : ViewModel() {
         }
     }
 
-    fun loadReviewTasks() {
+    fun loadReviewTasks(loadMore: Boolean = false) {
+        if (loadMore && (_state.value.reviewsLoadingMore || _state.value.reviewTasksNextCursor == null)) return
+        if (!loadMore && _state.value.reviewsLoading) return
         viewModelScope.launch {
-            _state.value = _state.value.copy(reviewsLoading = true, reviewsError = null)
-            runCatching { repository.getReviewTasks() }
-                .onSuccess { _state.value = _state.value.copy(reviewTasks = it, reviewsLoading = false) }
-                .onFailure { _state.value = _state.value.copy(reviewsLoading = false, reviewsError = it.userMessage()) }
+            _state.value = _state.value.copy(
+                reviewsLoading = !loadMore,
+                reviewsLoadingMore = loadMore,
+                reviewsError = null,
+            )
+            val cursor = if (loadMore) _state.value.reviewTasksNextCursor else null
+            runCatching { repository.getReviewTasks(cursor) }
+                .onSuccess { page ->
+                    val tasks = if (loadMore) (_state.value.reviewTasks + page.items).distinctBy { it.id } else page.items
+                    _state.value = _state.value.copy(
+                        reviewTasks = tasks,
+                        reviewTasksNextCursor = page.nextCursor,
+                        reviewsLoading = false,
+                        reviewsLoadingMore = false,
+                    )
+                }
+                .onFailure {
+                    _state.value = _state.value.copy(
+                        reviewsLoading = false,
+                        reviewsLoadingMore = false,
+                        reviewsError = it.userMessage(),
+                    )
+                }
         }
     }
 
-    fun submitReview(id: String, answer: String) {
-        viewModelScope.launch {
-            runCatching { repository.submitReview(id, answer) }
-                .onSuccess { loadReviewTasks() }
-                .onFailure { _state.value = _state.value.copy(reviewsError = it.userMessage()) }
+    fun beginReviewTask(taskId: String) {
+        if (_state.value.reviewDraftTaskId == taskId) return
+        reviewGeneration += 1
+        reviewLocationJob?.cancel()
+        reviewSubmitJob?.cancel()
+        clearEvidenceDraft(clearPlaceResults = false)
+        _state.value = _state.value.copy(
+            reviewDraftTaskId = taskId,
+            reviewLocationProof = null,
+            reviewLocationLoadingTaskId = null,
+            reviewSubmittingTaskId = null,
+            reviewNotice = null,
+            reviewSubmission = null,
+            reviewPendingSubmissionId = null,
+            reviewsError = null,
+        )
+    }
+
+    fun verifyReviewLocation(taskId: String, placeId: String) {
+        if (_state.value.reviewSubmittingTaskId != null) return
+        beginReviewTask(taskId)
+        val generation = ++reviewGeneration
+        reviewLocationJob?.cancel()
+        reviewLocationJob = viewModelScope.launch {
+            _state.value = _state.value.copy(
+                reviewLocationLoadingTaskId = taskId,
+                reviewLocationProof = null,
+                reviewsError = null,
+                reviewNotice = null,
+            )
+            try {
+                val proof = repository.verifyReviewLocation(taskId, placeId)
+                if (generation == reviewGeneration && _state.value.reviewDraftTaskId == taskId) {
+                    _state.value = _state.value.copy(reviewLocationProof = proof, reviewLocationLoadingTaskId = null)
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                if (generation == reviewGeneration && _state.value.reviewDraftTaskId == taskId) {
+                    _state.value = _state.value.copy(reviewLocationLoadingTaskId = null, reviewsError = error.userMessage())
+                }
+            }
         }
+    }
+
+    fun clearReviewLocationProof() {
+        reviewGeneration += 1
+        reviewLocationJob?.cancel()
+        _state.value = _state.value.copy(reviewLocationProof = null, reviewLocationLoadingTaskId = null)
+    }
+
+    fun submitReview(id: String, answer: String, includeImage: Boolean) {
+        if (reviewSubmitJob?.isActive == true || answer !in setOf("present", "absent", "unknown")) return
+        if (_state.value.reviewDraftTaskId != id) beginReviewTask(id)
+        val generation = ++reviewGeneration
+        val submissionId = _state.value.reviewPendingSubmissionId ?: UUID.randomUUID().toString()
+        _state.value = _state.value.copy(reviewPendingSubmissionId = submissionId)
+        reviewSubmitJob = viewModelScope.launch {
+            _state.value = _state.value.copy(reviewSubmittingTaskId = id, reviewsError = null, reviewNotice = null)
+            try {
+                val evidence = if (includeImage) {
+                    _state.value.preparedEvidence ?: error("请先生成并确认最终脱敏预览")
+                } else {
+                    null
+                }
+                val proofId = _state.value.reviewLocationProof
+                    ?.takeIf { it.reviewTaskId == id }
+                    ?.proofId
+                val result = repository.submitReview(id, submissionId, answer, proofId, evidence)
+                if (generation != reviewGeneration || _state.value.reviewDraftTaskId != id) return@launch
+                completeReviewSubmission(result)
+                runCatching { repository.getReviewTasks() }.onSuccess { refreshedPage ->
+                    if (generation == reviewGeneration) {
+                        _state.value = _state.value.copy(
+                            reviewTasks = refreshedPage.items,
+                            reviewTasksNextCursor = refreshedPage.nextCursor,
+                        )
+                    }
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                if (generation == reviewGeneration && _state.value.reviewDraftTaskId == id) {
+                    val recovered = if (error is ApiException) null else {
+                        runCatching { repository.getMyReviewSubmission(id, submissionId) }.getOrNull()
+                    }
+                    if (recovered != null && generation == reviewGeneration) {
+                        completeReviewSubmission(recovered)
+                    } else {
+                        _state.value = _state.value.copy(
+                            reviewLocationProof = if (error is ApiException) null else _state.value.reviewLocationProof,
+                            reviewLocationLoadingTaskId = null,
+                            reviewSubmittingTaskId = null,
+                            reviewPendingSubmissionId = if (error is ApiException) null else submissionId,
+                            reviewsError = if (error is ApiException) error.userMessage() else {
+                                "提交结果未能确认：${error.userMessage()}。请保持在此页面并重试，系统会复用同一提交编号。"
+                            },
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    fun discardReviewDraft() {
+        reviewGeneration += 1
+        reviewLocationJob?.cancel()
+        reviewSubmitJob?.cancel()
+        clearEvidenceDraft(clearPlaceResults = false)
+        _state.value = _state.value.copy(
+            reviewDraftTaskId = null,
+            reviewLocationProof = null,
+            reviewLocationLoadingTaskId = null,
+            reviewSubmittingTaskId = null,
+            reviewNotice = null,
+            reviewSubmission = null,
+            reviewPendingSubmissionId = null,
+            reviewsError = null,
+        )
+    }
+
+    fun abandonReviewConfirmation() {
+        reviewGeneration += 1
+        reviewLocationJob?.cancel()
+        reviewSubmitJob?.cancel()
+        clearEvidenceDraft(clearPlaceResults = false)
+        _state.value = _state.value.copy(
+            reviewDraftTaskId = null,
+            reviewLocationProof = null,
+            reviewLocationLoadingTaskId = null,
+            reviewSubmittingTaskId = null,
+            reviewPendingSubmissionId = null,
+            reviewSubmission = null,
+            reviewsError = null,
+            reviewNotice = "已停止本地确认。先前复核可能已被服务端记录；任务列表已刷新，请不要据此重复提交不同答案。",
+        )
+        loadReviewTasks()
+    }
+
+    private fun completeReviewSubmission(result: ReviewSubmissionData) {
+        releaseEvidenceImages()
+        _state.value = _state.value.copy(
+            reviewDraftTaskId = null,
+            reviewLocationProof = null,
+            reviewLocationLoadingTaskId = null,
+            reviewSubmittingTaskId = null,
+            reviewSubmission = result,
+            reviewPendingSubmissionId = null,
+            reviewNotice = "复核已记录，本票权重为 ${result.voteWeight}。社区结论会在满足人数和证据门槛后更新。",
+            reviewSubmissionVersion = _state.value.reviewSubmissionVersion + 1,
+        )
     }
 
     fun searchEvidencePlaces(query: String) {
@@ -371,6 +554,9 @@ class MainViewModel(private val repository: EazyPathRepository) : ViewModel() {
     }
 
     override fun onCleared() {
+        reviewGeneration += 1
+        reviewLocationJob?.cancel()
+        reviewSubmitJob?.cancel()
         evidenceImageGeneration += 1
         evidenceSubmitGeneration += 1
         evidenceImageJob?.cancel()

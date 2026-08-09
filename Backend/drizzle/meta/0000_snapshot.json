@@ -951,6 +951,12 @@
           "primaryKey": false,
           "notNull": true
         },
+        "client_submission_id": {
+          "name": "client_submission_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
         "answer": {
           "name": "answer",
           "type": "varchar(16)",
@@ -1650,6 +1656,12 @@
           "primaryKey": false,
           "notNull": true
         },
+        "review_task_id": {
+          "name": "review_task_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
         "passed": {
           "name": "passed",
           "type": "boolean",
@@ -1718,6 +1730,21 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
+        },
+        "idx_location_proofs_review_task": {
+          "name": "idx_location_proofs_review_task",
+          "columns": [
+            {
+              "expression": "review_task_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {
@@ -1740,6 +1767,19 @@
           "tableTo": "places",
           "columnsFrom": [
             "place_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "location_proofs_review_task_id_community_review_tasks_id_fk": {
+          "name": "location_proofs_review_task_id_community_review_tasks_id_fk",
+          "tableFrom": "location_proofs",
+          "tableTo": "community_review_tasks",
+          "columnsFrom": [
+            "review_task_id"
           ],
           "columnsTo": [
             "id"

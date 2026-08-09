@@ -137,16 +137,72 @@ data class VerificationDetails(
 
 data class ReviewTask(
     val id: String,
+    val reason: String,
+    @SerializedName("target_type") val targetType: String,
+    @SerializedName("target_id") val targetId: String,
+    @SerializedName("location_radius_meters") val locationRadiusMeters: Int,
+    @SerializedName("feature_key") val featureKey: String,
+    @SerializedName("feature_unit") val featureUnit: String?,
+    @SerializedName("place_id") val placeId: String,
     @SerializedName("place_name") val placeName: String,
     @SerializedName("feature_name") val featureName: String,
     val address: String?,
     val status: String,
+    @SerializedName("historical_value") val historicalValue: JsonElement?,
+    @SerializedName("historical_source") val historicalSource: String?,
+    @SerializedName("historical_grade") val historicalGrade: String?,
+    @SerializedName("historical_freshness_status") val historicalFreshnessStatus: String?,
+    @SerializedName("historical_moderation_status") val historicalModerationStatus: String?,
+    @SerializedName("historical_observed_at") val historicalObservedAt: String?,
+    @SerializedName("historical_expires_at") val historicalExpiresAt: String?,
+    @SerializedName("historical_has_redacted_media") val historicalHasRedactedMedia: Boolean,
+    @SerializedName("created_at") val createdAt: String,
+)
+
+data class ReviewTaskPage(
+    val items: List<ReviewTask>,
+    @SerializedName("next_cursor") val nextCursor: String?,
 )
 
 data class VoteRequest(
+    @SerializedName("submission_id") val submissionId: String,
     val answer: String,
     @SerializedName("media_id") val mediaId: String? = null,
     @SerializedName("location_proof_id") val locationProofId: String? = null,
+)
+
+data class LocationProofRequest(
+    @SerializedName("place_id") val placeId: String,
+    @SerializedName("review_task_id") val reviewTaskId: String,
+    val latitude: Double,
+    val longitude: Double,
+    @SerializedName("accuracy_meters") val accuracyMeters: Double,
+)
+
+data class LocationProofData(
+    @SerializedName("proof_id") val proofId: String?,
+    @SerializedName("canonical_place_id") val canonicalPlaceId: String,
+    @SerializedName("review_task_id") val reviewTaskId: String?,
+    val passed: Boolean,
+    @SerializedName("distance_bucket") val distanceBucket: String,
+    @SerializedName("radius_meters") val radiusMeters: Int,
+    @SerializedName("expires_at") val expiresAt: String,
+    @SerializedName("privacy_notice") val privacyNotice: String,
+)
+
+data class ConsensusSummary(
+    val status: String,
+    val outcome: String?,
+    val presentWeight: Double,
+    val absentWeight: Double,
+    val directionalWeight: Double,
+    val dominantRatio: Double,
+    val distinctInstallations: Int,
+)
+
+data class ReviewSubmissionData(
+    @SerializedName("vote_weight") val voteWeight: Double,
+    val consensus: ConsensusSummary,
 )
 
 data class PlaceAccessibility(
@@ -244,10 +300,19 @@ interface EazyPathApiService {
     suspend fun getVerification(@Path("id") id: String): ApiEnvelope<VerificationDetails>
 
     @GET("api/v1/review-tasks")
-    suspend fun getReviewTasks(): ApiEnvelope<List<ReviewTask>>
+    suspend fun getReviewTasks(@Query("cursor") cursor: String? = null): ApiEnvelope<ReviewTaskPage>
+
+    @GET("api/v1/review-tasks/{id}/my-submission")
+    suspend fun getMyReviewSubmission(
+        @Path("id") id: String,
+        @Query("submission_id") submissionId: String,
+    ): ApiEnvelope<ReviewSubmissionData>
+
+    @POST("api/v1/location-proofs/verify")
+    suspend fun verifyLocationProof(@Body request: LocationProofRequest): ApiEnvelope<LocationProofData>
 
     @POST("api/v1/review-tasks/{id}/submissions")
-    suspend fun submitReview(@Path("id") id: String, @Body request: VoteRequest): ApiEnvelope<JsonElement>
+    suspend fun submitReview(@Path("id") id: String, @Body request: VoteRequest): ApiEnvelope<ReviewSubmissionData>
 
     @GET("api/v1/places/search")
     suspend fun searchPlaces(@Query("q") query: String, @Query("region") region: String = "江西省"): ApiEnvelope<List<PlaceSearchItem>>
