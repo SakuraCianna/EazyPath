@@ -14,7 +14,7 @@ EazyPath 是面向轮椅和行动不便用户的真实数据无障碍出行链 M
 | 社区证据 | Android 已支持真实地点搜索、数据库字段定义动态表单、端侧脱敏与分片续传，并已接入复核任务绑定的一次性高德定位证明与可选脱敏图片；后端已有字段类型校验、撤回、审核、30 天申诉、加权共识和到期复核派单 | 高频/非到期冲突自动派单与真实数据库并发测试 |
 | 地图与普通路线 | Android 已接真实地点搜索、审核证据详情、地图标记、手动/一次性位置起点、RouteSearchV2 普通步行路线和高德 App/Web/复制兜底 | 路段空间证据模型、路线证据覆盖率与用户偏好排序 |
 | 管理端 | React 已接安全会话恢复、权限导航、现场证据/申诉/AI 验真/社区冲突队列、受控媒体读取、地点治理、管理员与角色管理、账号安全，并统一采用响应式 Material 3 Expressive 设计 | 浏览器 UI 自动化测试、任务/媒体/审计等其余运营页的专用操作 |
-| 语音 | Android 系统语音识别与 TTS 可用；四类 AI 分项同意中心已完成 | Qwen 实时 ASR/TTS WebSocket、PCM/Opus 流式采集与对应同意弹窗启用 |
+| 语音 | 后端 Qwen 实时 ASR/TTS WebSocket 网关、四类 AI 分项同意中心已完成；Android 系统语音识别与 TTS 仍可用 | Android AudioRecord/AudioTrack 接入后端网关，并启用 ASR/TTS 使用时同意弹窗 |
 | 部署 | Node 24、PG 18/PostGIS、Redis 8/BullMQ、Nginx Compose 已配置 | 当前 Compose 仅供受控测试；生产 TLS/WSS 证书与外部入口尚未配置 |
 
 - `App/`：Android 29+ 原生 App，Jetpack Compose + Material 3、高德地图、匿名安装账户、文字任务链、图片验真、社区复核、语音输入和结果播报
@@ -30,7 +30,9 @@ EazyPath 是面向轮椅和行动不便用户的真实数据无障碍出行链 M
 - 无障碍属性来自经审核的结构化证据；高德 POI 本身不等于轮椅友好
 - AI 验真原图进入非持久临时目录，处理完成立即删除，异常残留由 BullMQ 周期任务在 10 分钟内清理
 - 社区证据只保存用户确认后的脱敏图片，支持审核、过期、冲突和其他用户复核
-- Android 当前使用系统语音识别和 TTS 完成可用的语音输入与播报；PRD 中的 Qwen 实时 ASR/TTS WebSocket 网关尚未接通
+- `/ws/voice-stream` 已实现 Bearer 鉴权、Redis 单安装账户租约、60 秒 16kHz/16bit/mono PCM ASR 上限、Qwen3-ASR 中间/最终文本映射，以及仅从当前账户任务/卡片最小投影读取文本的 Qwen-Audio TTS；音频只在内存转发，不写入服务器磁盘
+- 百炼实时语音使用北京地域 Workspace 专属 WSS 域名；部署时需填写 `DASHSCOPE_WORKSPACE_ID`，TTS 默认使用 `qwen-audio-3.0-tts-plus` 官方系统音色 `longanlingxin`
+- Android 当前仍使用系统语音识别和 TTS 完成可用的语音输入与播报；下一模块将改为 AudioRecord/AudioTrack 接入网关，在网络失败、拒绝或撤回同意时保留文字输入/阅读降级
 - `GET /api/v1/privacy/ai-consents` 与 `PUT /api/v1/privacy/ai-consents/:capability` 提供 Agent、VLM、ASR、TTS 四类独立同意、拒绝与撤回状态；写入携带乐观版本，服务端固定当前政策版本，旧页面不能静默覆盖新选择，同意元数据随隐私导出返回并在匿名账户删除时级联清理
 - Android 首页和图片验真在真实百炼调用前展示处理者、数据类型、用途、北京接入地域、替代方式、核验日期与供应商保留期限/删除能力尚未明确的说明；个人偏好页可逐项查看、同意或撤回
 - Agent 任务创建/补充/重试与图片验真上传均在 API 层检查有效同意，Worker 在实际外发前二次检查，覆盖排队期间撤回；Agent 外发文本会移除手机号、身份证号和精确门牌，只发送规划必需的轮椅偏好字段

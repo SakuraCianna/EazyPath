@@ -37,6 +37,7 @@ describe('buildEnvEntries', () => {
       ['MEDIA_FINGERPRINT_KEYRING', 'v1:replace_with_different_32_byte_base64_key'],
       ['ADMIN_BOOTSTRAP_PASSWORD', 'replace_with_local_development_password'],
       ['DASHSCOPE_API_KEY', 'replace_with_dashscope_api_key'],
+      ['DASHSCOPE_WORKSPACE_ID', 'workspace-bj-01'],
     ]);
 
     const values = toMap(buildEnvEntries(current));
@@ -48,6 +49,7 @@ describe('buildEnvEntries', () => {
     expect(values.get('MEDIA_FINGERPRINT_KEYRING')).not.toContain('replace_with_');
     expect(values.get('ADMIN_BOOTSTRAP_PASSWORD')).not.toContain('replace_with_');
     expect(values.get('DASHSCOPE_API_KEY')).toBe('replace_with_dashscope_api_key');
+    expect(values.get('DASHSCOPE_WORKSPACE_ID')).toBe('workspace-bj-01');
   });
 
   it('拒绝静默删除非默认的旧高级配置', () => {
