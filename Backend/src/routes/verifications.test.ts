@@ -11,6 +11,7 @@ const fixtures = vi.hoisted(() => ({
 const placeResolution = vi.hoisted(() => ({ resolveActivePlace: vi.fn(), lockCanonicalPlace: vi.fn() }));
 const mediaStorage = vi.hoisted(() => ({ saveTemporaryVerificationImage: vi.fn(), removeTemporaryVerificationImage: vi.fn() }));
 const queue = vi.hoisted(() => ({ enqueueVisionVerification: vi.fn() }));
+const aiConsent = vi.hoisted(() => ({ hasActiveAiConsent: vi.fn() }));
 const database = vi.hoisted(() => {
   const insertedValues = vi.fn();
   const tx = {
@@ -46,6 +47,7 @@ vi.mock('../middleware/auth.js', () => ({
 vi.mock('../queue/task-queue.js', () => queue);
 vi.mock('../services/media-storage.js', () => mediaStorage);
 vi.mock('../services/place-resolution.js', () => placeResolution);
+vi.mock('../services/ai-consent.js', () => ({ hasActiveAiConsent: aiConsent.hasActiveAiConsent }));
 
 import { verificationsRouter } from './verifications.js';
 import type { AppBindings } from '../types.js';
@@ -75,6 +77,18 @@ describe('AI 验真地点治理与临时文件', () => {
     placeResolution.resolveActivePlace.mockResolvedValue({ id: fixtures.canonicalPlaceId, latitude: '28.6', longitude: '115.9' });
     placeResolution.lockCanonicalPlace.mockResolvedValue({ id: fixtures.canonicalPlaceId, latitude: '28.6', longitude: '115.9' });
     queue.enqueueVisionVerification.mockResolvedValue(undefined);
+    aiConsent.hasActiveAiConsent.mockResolvedValue(true);
+  });
+
+  it('未同意图片辅助判断时不解析或保存上传内容', async () => {
+    aiConsent.hasActiveAiConsent.mockResolvedValue(false);
+
+    const response = await imageRequest();
+
+    expect(response.status).toBe(403);
+    expect((await response.json()).code).toBe('AI_CONSENT_REQUIRED');
+    expect(mediaStorage.saveTemporaryVerificationImage).not.toHaveBeenCalled();
+    expect(database.db.transaction).not.toHaveBeenCalled();
   });
 
   it('在写临时文件前拒绝非法地点 ID', async () => {

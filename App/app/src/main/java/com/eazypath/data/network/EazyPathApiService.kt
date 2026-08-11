@@ -78,6 +78,39 @@ data class UpdateProfileRequest(
     val interaction: InteractionProfile,
 )
 
+data class AiConsentItem(
+    val capability: String,
+    val title: String,
+    val dataType: String,
+    val purpose: String,
+    val fallback: String,
+    val granted: Boolean,
+    val decision: String,
+    val policyVersion: String,
+    val consentedPolicyVersion: String?,
+    val consentedProcessor: String?,
+    val consentedRegion: String?,
+    val noticeVerifiedAt: String,
+    val grantedAt: String?,
+    val revokedAt: String?,
+    val version: Int?,
+    val processor: String,
+    val region: String,
+    val privacyUrl: String,
+    val retentionNotice: String,
+)
+
+data class AiConsentListData(
+    @SerializedName("policy_version") val policyVersion: String,
+    val consents: List<AiConsentItem>,
+)
+
+data class AiConsentUpdateRequest(
+    val granted: Boolean,
+    @SerializedName("policy_version") val policyVersion: String,
+    @SerializedName("expected_version") val expectedVersion: Int?,
+)
+
 data class CreateTaskRequest(
     @SerializedName("input_type") val inputType: String = "text",
     val content: String,
@@ -327,6 +360,15 @@ interface EazyPathApiService {
 
     @PUT("api/v1/profile")
     suspend fun updateProfile(@Body request: UpdateProfileRequest): ApiEnvelope<ProfileData>
+
+    @GET("api/v1/privacy/ai-consents")
+    suspend fun getAiConsents(): ApiEnvelope<AiConsentListData>
+
+    @PUT("api/v1/privacy/ai-consents/{capability}")
+    suspend fun updateAiConsent(
+        @Path("capability") capability: String,
+        @Body request: AiConsentUpdateRequest,
+    ): ApiEnvelope<AiConsentItem>
 
     @POST("api/v1/tasks")
     suspend fun createTask(

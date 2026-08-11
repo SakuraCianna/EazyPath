@@ -1458,6 +1458,146 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
+    "public.ai_processing_consents": {
+      "name": "ai_processing_consents",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "installation_id": {
+          "name": "installation_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "capability": {
+          "name": "capability",
+          "type": "varchar(16)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "policy_version": {
+          "name": "policy_version",
+          "type": "varchar(32)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "processor": {
+          "name": "processor",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'aliyun_model_studio'"
+        },
+        "region": {
+          "name": "region",
+          "type": "varchar(32)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'cn-beijing'"
+        },
+        "notice_verified_at": {
+          "name": "notice_verified_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "granted_at": {
+          "name": "granted_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "revoked_at": {
+          "name": "revoked_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "version": {
+          "name": "version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 1
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "uq_ai_processing_consents_installation_capability": {
+          "name": "uq_ai_processing_consents_installation_capability",
+          "columns": [
+            {
+              "expression": "installation_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "capability",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "ai_processing_consents_installation_id_installation_accounts_id_fk": {
+          "name": "ai_processing_consents_installation_id_installation_accounts_id_fk",
+          "tableFrom": "ai_processing_consents",
+          "tableTo": "installation_accounts",
+          "columnsFrom": [
+            "installation_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "chk_ai_processing_consents_capability": {
+          "name": "chk_ai_processing_consents_capability",
+          "value": "\"ai_processing_consents\".\"capability\" IN ('agent', 'vision', 'asr', 'tts')"
+        },
+        "chk_ai_processing_consents_decision": {
+          "name": "chk_ai_processing_consents_decision",
+          "value": "\"ai_processing_consents\".\"granted_at\" IS NOT NULL OR \"ai_processing_consents\".\"revoked_at\" IS NOT NULL"
+        },
+        "chk_ai_processing_consents_version": {
+          "name": "chk_ai_processing_consents_version",
+          "value": "\"ai_processing_consents\".\"version\" > 0"
+        }
+      },
+      "isRLSEnabled": false
+    },
     "public.installation_accounts": {
       "name": "installation_accounts",
       "schema": "",
