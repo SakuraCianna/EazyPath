@@ -47,7 +47,12 @@ placesRouter.get('/search', async (c) => {
     const evidenceByPlace = new Map<string, Array<{ grade: string; expiresAt: Date | null }>>();
     for (const item of evidence) evidenceByPlace.set(item.placeId, [...(evidenceByPlace.get(item.placeId) ?? []), { grade: item.grade, expiresAt: item.expiresAt }]);
     return ok(c, persisted.map((item) => ({
-      ...item,
+      id: item.id,
+      name: item.name,
+      category_code: item.category_code,
+      longitude: item.longitude,
+      latitude: item.latitude,
+      address: item.address,
       accessibility: summarizeEvidence(evidenceByPlace.get(item.id) ?? []),
     })));
   } catch (error) {
@@ -72,8 +77,18 @@ placesRouter.get('/:placeId', async (c) => {
     const [place] = await tx.select().from(places).where(eq(places.id, lockedPlace.id)).limit(1);
     if (!place) return undefined;
     const [units, facilityRows, evidenceRows] = await Promise.all([
-      tx.select().from(placeUnits).where(eq(placeUnits.placeId, place.id)),
-      tx.select().from(facilities).where(eq(facilities.placeId, place.id)),
+      tx.select({
+        id: placeUnits.id,
+        parent_unit_id: placeUnits.parentUnitId,
+        unit_type: placeUnits.unitType,
+        name: placeUnits.name,
+      }).from(placeUnits).where(eq(placeUnits.placeId, place.id)),
+      tx.select({
+        id: facilities.id,
+        place_unit_id: facilities.placeUnitId,
+        facility_type: facilities.facilityType,
+        name: facilities.name,
+      }).from(facilities).where(eq(facilities.placeId, place.id)),
       tx.select({
       id: observations.id,
       feature_key: featureDefinitions.featureKey,
@@ -96,7 +111,16 @@ placesRouter.get('/:placeId', async (c) => {
   });
   if (!result) return fail(c, 409, 'PLACE_STATE_CHANGED', '地点状态刚刚发生变化，请刷新后重试');
   return ok(c, {
-    place: result.place,
+    place: {
+      id: result.place.id,
+      name: result.place.name,
+      category_code: result.place.categoryCode,
+      longitude: Number(result.place.longitude),
+      latitude: Number(result.place.latitude),
+      address: result.place.address,
+      external_source: result.place.externalSource,
+      status: result.place.status,
+    },
     canonical_place_id: result.place.id,
     requested_place_id: requestedPlaceId,
     units: result.units,

@@ -21,6 +21,7 @@ class MainActivity : ComponentActivity() {
                 EazyPathNavGraph(
                     navController = rememberNavController(),
                     viewModel = viewModel,
+                    repository = repository,
                 )
             }
         }

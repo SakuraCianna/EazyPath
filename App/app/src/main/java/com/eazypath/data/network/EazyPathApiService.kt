@@ -215,8 +215,56 @@ data class PlaceSearchItem(
     val id: String,
     val name: String,
     val address: String?,
+    @SerializedName("category_code") val categoryCode: String,
+    val longitude: Double,
+    val latitude: Double,
     val accessibility: PlaceAccessibility,
 )
+
+data class PlaceRecord(
+    val id: String,
+    val name: String,
+    val address: String?,
+    @SerializedName("category_code") val categoryCode: String,
+    val longitude: Double,
+    val latitude: Double,
+    @SerializedName("external_source") val externalSource: String?,
+    val status: String,
+)
+
+data class PlaceEvidence(
+    val id: String,
+    @SerializedName("feature_key") val featureKey: String,
+    @SerializedName("display_name") val displayName: String,
+    val value: JsonElement,
+    val source: String,
+    val grade: String,
+    @SerializedName("moderation_status") val moderationStatus: String,
+    @SerializedName("freshness_status") val freshnessStatus: String,
+    @SerializedName("observed_at") val observedAt: String?,
+    @SerializedName("expires_at") val expiresAt: String?,
+    @SerializedName("created_at") val createdAt: String,
+)
+
+data class PlaceDetails(
+    val place: PlaceRecord,
+    @SerializedName("canonical_place_id") val canonicalPlaceId: String,
+    @SerializedName("requested_place_id") val requestedPlaceId: String,
+    val units: List<JsonElement>,
+    val facilities: List<JsonElement>,
+    @SerializedName("evidence_timeline") val evidenceTimeline: List<PlaceEvidence>,
+    @SerializedName("evidence_timeline_has_more") val evidenceTimelineHasMore: Boolean,
+)
+
+data class LinkResolveRequest(
+    val platform: String = "amap",
+    @SerializedName("destination_name") val destinationName: String,
+    val longitude: Double,
+    val latitude: Double,
+    @SerializedName("accessibility_notes") val accessibilityNotes: String,
+)
+
+data class LinkActionsData(val actions: List<ServiceAction>)
 
 data class FeatureDefinition(
     @SerializedName("feature_key") val featureKey: String,
@@ -319,6 +367,12 @@ interface EazyPathApiService {
 
     @GET("api/v1/places/feature-definitions")
     suspend fun getFeatureDefinitions(): ApiEnvelope<List<FeatureDefinition>>
+
+    @GET("api/v1/places/{placeId}")
+    suspend fun getPlaceDetails(@Path("placeId") placeId: String): ApiEnvelope<PlaceDetails>
+
+    @POST("api/v1/links/resolve")
+    suspend fun resolveLinkActions(@Body request: LinkResolveRequest): ApiEnvelope<LinkActionsData>
 
     @POST("api/v1/media/uploads")
     suspend fun initializeUpload(
