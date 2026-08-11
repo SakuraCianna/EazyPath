@@ -22,6 +22,7 @@ import { verificationsRouter } from './routes/verifications.js';
 import { prepareMediaDirectories } from './services/media-storage.js';
 import { closeAdminLoginGuard } from './services/admin-login-guard.js';
 import { closeCommunityReviewGuard } from './services/community-review-guard.js';
+import { closeTaskEventStreamGuard } from './services/task-event-stream-guard.js';
 import type { AppBindings } from './types.js';
 
 const env = getEnv();
@@ -88,7 +89,7 @@ async function main(): Promise<void> {
 
 async function shutdown(signal: string): Promise<void> {
   console.info(JSON.stringify({ level: 'info', event: 'server.shutdown', signal }));
-  await Promise.all([taskQueue.close(), closeAdminLoginGuard(), closeCommunityReviewGuard(), queryClient.end()]);
+  await Promise.all([taskQueue.close(), closeAdminLoginGuard(), closeCommunityReviewGuard(), closeTaskEventStreamGuard(), queryClient.end()]);
   process.exit(0);
 }
 

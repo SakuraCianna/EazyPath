@@ -2,11 +2,14 @@ import { and, eq } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import { z } from 'zod';
-import { agentTasks, db } from '../db/index.js';
+import { decideTaskEventResume, parseTaskEventCursor } from '../domain/task-event-stream.js';
+import { getEnv } from '../config/env.js';
+import { agentTasks, db, taskEvents } from '../db/index.js';
 import { fail, ok } from '../lib/api-response.js';
 import { requireUser } from '../middleware/auth.js';
 import { enqueueAgentTask } from '../queue/task-queue.js';
-import { appendTaskEvent, createTask, getTaskEvents, getTaskForInstallation, listTasks } from '../repositories/taskRepository.js';
+import { createTask, getLatestTaskEventId, getTaskEventCursor, getTaskEvents, getTaskForInstallation, getTaskIdentityForInstallation, listTasks } from '../repositories/taskRepository.js';
+import { acquireTaskEventStreamPermit, TaskEventStreamProtectionUnavailableError } from '../services/task-event-stream-guard.js';
 import type { AppBindings } from '../types.js';
 
 const createTaskSchema = z.object({
@@ -38,8 +41,7 @@ tasksRouter.post('/', async (c) => {
     try {
       await enqueueAgentTask(result.task.id);
     } catch {
-      await db.update(agentTasks).set({ status: 'failed', failureCode: 'QUEUE_UNAVAILABLE', failureMessage: '任务队列暂时不可用', updatedAt: new Date() }).where(eq(agentTasks.id, result.task.id));
-      await appendTaskEvent(result.task.id, 'task.failed', { code: 'QUEUE_UNAVAILABLE', retryable: true });
+      await markQueueFailure(result.task.id);
       return fail(c, 503, 'QUEUE_UNAVAILABLE', '任务已保存，但队列暂时不可用，可稍后重试', { retryable: true, retry_after_ms: 2_000 });
     }
   }
@@ -47,38 +49,124 @@ tasksRouter.post('/', async (c) => {
 });
 
 tasksRouter.get('/:taskId/events', async (c) => {
-  const task = await getTaskForInstallation(c.req.param('taskId'), c.get('installationId'));
-  if (!task) return fail(c, 404, 'TASK_NOT_FOUND', '任务不存在');
-  const headerCursor = Number(c.req.header('last-event-id') ?? 0);
-  const queryCursor = Number(c.req.query('after') ?? 0);
-  let cursor = Math.max(Number.isFinite(headerCursor) ? headerCursor : 0, Number.isFinite(queryCursor) ? queryCursor : 0);
+  const taskId = z.uuid().safeParse(c.req.param('taskId'));
+  if (!taskId.success) return fail(c, 422, 'INVALID_TASK_ID', '任务 ID 无效');
+  const cursorInput = parseTaskEventCursor(c.req.header('last-event-id'), c.req.query('after'));
+  if (!cursorInput.ok) return fail(c, 422, 'INVALID_EVENT_CURSOR', '事件游标无效');
+  let permit;
+  try {
+    permit = await acquireTaskEventStreamPermit(c.get('installationId'));
+  } catch (error) {
+    if (error instanceof TaskEventStreamProtectionUnavailableError) {
+      return fail(c, 503, 'EVENT_STREAM_PROTECTION_UNAVAILABLE', '任务事件流保护服务暂时不可用', { retryable: true });
+    }
+    throw error;
+  }
+  if (!permit.allowed) {
+    c.header('Retry-After', String(permit.retryAfterSeconds));
+    return fail(c, 429, 'EVENT_STREAM_LIMITED', '任务事件连接过于频繁，请稍后重试', {
+      retryable: true,
+      retry_after_ms: permit.retryAfterSeconds * 1_000,
+    });
+  }
+  let task;
+  try {
+    task = await getTaskIdentityForInstallation(taskId.data, c.get('installationId'));
+  } catch (error) {
+    await permit.release().catch(() => undefined);
+    throw error;
+  }
+  if (!task) {
+    await permit.release().catch(() => undefined);
+    return fail(c, 404, 'TASK_NOT_FOUND', '任务不存在');
+  }
+  let cursorEvent;
+  let latestEventId;
+  try {
+    [cursorEvent, latestEventId] = await Promise.all([
+      cursorInput.cursor === 0 ? Promise.resolve(null) : getTaskEventCursor(task.id, cursorInput.cursor),
+      getLatestTaskEventId(task.id),
+    ]);
+  } catch (error) {
+    await permit.release().catch(() => undefined);
+    throw error;
+  }
+  const resume = decideTaskEventResume({
+    cursor: cursorInput.cursor,
+    cursorOccurredAt: cursorEvent?.occurredAt ?? null,
+    latestEventId,
+    now: new Date(),
+    resumeWindowSeconds: getEnv().SSE_RESUME_WINDOW_SECONDS,
+  });
+  let cursor = resume.cursor;
+  c.header('Cache-Control', 'no-store');
+  c.header('X-Accel-Buffering', 'no');
   return streamSSE(c, async (stream) => {
-    let idleCycles = 0;
-    while (!stream.aborted) {
-      const events = await getTaskEvents(task.id, cursor);
-      for (const event of events) {
-        cursor = event.id;
-        await stream.writeSSE({
-          id: String(event.id),
-          event: event.eventType,
-          data: JSON.stringify({
-            event_id: event.id,
-            task_id: event.taskId,
-            type: event.eventType,
-            schema_version: event.schemaVersion,
-            occurred_at: event.occurredAt.toISOString(),
-            data: event.eventData,
-          }),
-        });
+    try {
+      if (resume.kind === 'reset') {
+        await writeTaskStreamReset(stream, task.id, cursor, resume.reason);
       }
-      idleCycles = events.length === 0 ? idleCycles + 1 : 0;
-      const [latest] = await db.select({ status: agentTasks.status }).from(agentTasks).where(eq(agentTasks.id, task.id)).limit(1);
-      if (idleCycles >= 2 && ['completed', 'failed', 'cancelled'].includes(latest?.status ?? '')) break;
-      if (idleCycles > 0 && idleCycles % 15 === 0) await stream.writeSSE({ event: 'heartbeat', data: '{}' });
-      await stream.sleep(1_000);
+      let idleCycles = 0;
+      let leaseCycles = 0;
+      while (!stream.aborted) {
+        const events = await getTaskEvents(task.id, cursor);
+        for (const event of events) {
+          cursor = event.id;
+          await stream.writeSSE({
+            id: String(event.id),
+            event: event.eventType,
+            data: JSON.stringify({
+              event_id: event.id,
+              task_id: event.taskId,
+              type: event.eventType,
+              schema_version: event.schemaVersion,
+              occurred_at: event.occurredAt.toISOString(),
+              data: event.eventData,
+            }),
+          });
+        }
+        idleCycles = events.length === 0 ? idleCycles + 1 : 0;
+        leaseCycles += 1;
+        if (leaseCycles >= 30) {
+          await permit.refresh();
+          leaseCycles = 0;
+        }
+        if (idleCycles >= 5 && idleCycles % 5 === 0) {
+          const [latest] = await db.select({ status: agentTasks.status }).from(agentTasks).where(eq(agentTasks.id, task.id)).limit(1);
+          if (['completed', 'failed', 'cancelled'].includes(latest?.status ?? '')) {
+            // A terminal snapshot can exist even if a process stopped between the state update and event insert.
+            await writeTaskStreamReset(stream, task.id, cursor, 'terminal_snapshot');
+            break;
+          }
+        }
+        if (idleCycles > 0 && idleCycles % 15 === 0) await stream.writeSSE({ event: 'heartbeat', data: '{}' });
+        await stream.sleep(1_000);
+      }
+    } finally {
+      await permit.release().catch(() => undefined);
     }
   });
 });
+
+async function writeTaskStreamReset(
+  stream: { writeSSE: (input: { id?: string; event: string; data: string }) => Promise<void> },
+  taskId: string,
+  cursor: number,
+  reason: 'cursor_not_found' | 'resume_window_expired' | 'terminal_snapshot',
+): Promise<void> {
+  await stream.writeSSE({
+    ...(cursor > 0 ? { id: String(cursor) } : {}),
+    event: 'stream.reset',
+    data: JSON.stringify({
+      event_id: cursor,
+      task_id: taskId,
+      type: 'stream.reset',
+      schema_version: 1,
+      occurred_at: new Date().toISOString(),
+      data: { reason },
+    }),
+  });
+}
 
 tasksRouter.get('/:taskId', async (c) => {
   const task = await getTaskForInstallation(c.req.param('taskId'), c.get('installationId'));
@@ -92,9 +180,13 @@ tasksRouter.post('/:taskId/input', async (c) => {
   const task = await getTaskForInstallation(c.req.param('taskId'), c.get('installationId'));
   if (!task) return fail(c, 404, 'TASK_NOT_FOUND', '任务不存在');
   if (!['needs_input', 'failed'].includes(task.status)) return fail(c, 409, 'TASK_STATE_CONFLICT', '当前任务状态不接受补充信息');
-  const [queued] = await db.update(agentTasks).set({ originalContent: `${task.originalContent}\n补充信息: ${body.data.content}`, status: 'queued', updatedAt: new Date() }).where(and(eq(agentTasks.id, task.id), eq(agentTasks.status, task.status))).returning();
+  const queued = await db.transaction(async (tx) => {
+    const [updated] = await tx.update(agentTasks).set({ originalContent: `${task.originalContent}\n补充信息: ${body.data.content}`, status: 'queued', runClaimToken: null, updatedAt: new Date() }).where(and(eq(agentTasks.id, task.id), eq(agentTasks.status, task.status))).returning();
+    if (!updated) return null;
+    await tx.insert(taskEvents).values({ taskId: task.id, eventType: 'task.input_received', eventData: {} });
+    return updated;
+  });
   if (!queued) return fail(c, 409, 'TASK_STATE_CONFLICT', '任务状态已变化，请刷新后重试');
-  await appendTaskEvent(task.id, 'task.input_received', {});
   try {
     await enqueueAgentTask(task.id, `input-${queued.updatedAt.getTime()}`);
   } catch {
@@ -108,9 +200,13 @@ tasksRouter.post('/:taskId/retry', async (c) => {
   const task = await getTaskForInstallation(c.req.param('taskId'), c.get('installationId'));
   if (!task) return fail(c, 404, 'TASK_NOT_FOUND', '任务不存在');
   if (task.status !== 'failed') return fail(c, 409, 'TASK_STATE_CONFLICT', '只有失败任务可以重试');
-  const [queued] = await db.update(agentTasks).set({ status: 'queued', failureCode: null, failureMessage: null, updatedAt: new Date() }).where(and(eq(agentTasks.id, task.id), eq(agentTasks.status, 'failed'))).returning();
+  const queued = await db.transaction(async (tx) => {
+    const [updated] = await tx.update(agentTasks).set({ status: 'queued', runClaimToken: null, failureCode: null, failureMessage: null, updatedAt: new Date() }).where(and(eq(agentTasks.id, task.id), eq(agentTasks.status, 'failed'))).returning();
+    if (!updated) return null;
+    await tx.insert(taskEvents).values({ taskId: task.id, eventType: 'task.requeued', eventData: {} });
+    return updated;
+  });
   if (!queued) return fail(c, 409, 'TASK_STATE_CONFLICT', '任务已被其他请求处理，请刷新后重试');
-  await appendTaskEvent(task.id, 'task.requeued', {});
   try {
     await enqueueAgentTask(task.id, `retry-${queued.updatedAt.getTime()}`);
   } catch {
@@ -124,18 +220,31 @@ tasksRouter.post('/:taskId/cancel', async (c) => {
   const task = await getTaskForInstallation(c.req.param('taskId'), c.get('installationId'));
   if (!task) return fail(c, 404, 'TASK_NOT_FOUND', '任务不存在');
   if (['completed', 'cancelled'].includes(task.status)) return fail(c, 409, 'TASK_STATE_CONFLICT', '任务已结束');
-  const [cancelled] = await db.update(agentTasks).set({ status: 'cancelled', cancelledAt: new Date(), updatedAt: new Date() }).where(and(eq(agentTasks.id, task.id), eq(agentTasks.status, task.status))).returning({ id: agentTasks.id });
+  const cancelled = await db.transaction(async (tx) => {
+    const [updated] = await tx.update(agentTasks).set({ status: 'cancelled', runClaimToken: null, cancelledAt: new Date(), updatedAt: new Date() }).where(and(eq(agentTasks.id, task.id), eq(agentTasks.status, task.status))).returning({ id: agentTasks.id });
+    if (!updated) return null;
+    await tx.insert(taskEvents).values({ taskId: task.id, eventType: 'task.cancelled', eventData: {} });
+    return updated;
+  });
   if (!cancelled) return fail(c, 409, 'TASK_STATE_CONFLICT', '任务状态已变化，请刷新后重试');
-  await appendTaskEvent(task.id, 'task.cancelled', {});
   return ok(c, { task_id: task.id, status: 'cancelled' });
 });
 
 async function markQueueFailure(taskId: string): Promise<void> {
-  const [failed] = await db.update(agentTasks).set({
-    status: 'failed',
-    failureCode: 'QUEUE_UNAVAILABLE',
-    failureMessage: '任务队列暂时不可用',
-    updatedAt: new Date(),
-  }).where(and(eq(agentTasks.id, taskId), eq(agentTasks.status, 'queued'))).returning({ id: agentTasks.id });
-  if (failed) await appendTaskEvent(taskId, 'task.failed', { code: 'QUEUE_UNAVAILABLE', retryable: true });
+  await db.transaction(async (tx) => {
+    const [failed] = await tx.update(agentTasks).set({
+      status: 'failed',
+      runClaimToken: null,
+      failureCode: 'QUEUE_UNAVAILABLE',
+      failureMessage: '任务队列暂时不可用',
+      updatedAt: new Date(),
+    }).where(and(eq(agentTasks.id, taskId), eq(agentTasks.status, 'queued'))).returning({ id: agentTasks.id });
+    if (failed) {
+      await tx.insert(taskEvents).values({
+        taskId,
+        eventType: 'task.failed',
+        eventData: { code: 'QUEUE_UNAVAILABLE', retryable: true },
+      });
+    }
+  });
 }

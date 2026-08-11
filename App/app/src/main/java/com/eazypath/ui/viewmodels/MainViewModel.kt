@@ -20,6 +20,7 @@ import com.eazypath.data.network.ProfileData
 import com.eazypath.data.network.ReviewTask
 import com.eazypath.data.network.ReviewSubmissionData
 import com.eazypath.data.network.TaskDetails
+import com.eazypath.data.network.TaskEventProtocol
 import com.eazypath.data.network.VerificationDetails
 import com.google.gson.JsonElement
 import kotlinx.coroutines.CancellationException
@@ -31,6 +32,9 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.conflate
+import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.flow.takeWhile
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.UUID
@@ -579,17 +583,43 @@ class MainViewModel(private val repository: EazyPathRepository) : ViewModel() {
         }
     }
 
-    private suspend fun refreshTask(taskId: String) {
-        runCatching { repository.getTask(taskId) }
-            .onSuccess { _state.value = _state.value.copy(task = it, taskLoading = !it.isTerminal(), taskError = null) }
-            .onFailure { _state.value = _state.value.copy(taskLoading = false, taskError = it.userMessage()) }
-    }
+    private suspend fun refreshTask(taskId: String): TaskRefreshOutcome = runCatching { repository.getTask(taskId) }
+        .fold(
+            onSuccess = {
+                _state.value = _state.value.copy(task = it, taskLoading = !it.isTerminal(), taskError = null)
+                TaskRefreshOutcome.Success
+            },
+            onFailure = {
+                _state.value = _state.value.copy(taskLoading = false, taskError = it.userMessage())
+                if (com.eazypath.data.isRetryableTaskSnapshotError(it)) TaskRefreshOutcome.RetryableFailure
+                else TaskRefreshOutcome.PermanentFailure
+            },
+        )
 
     private fun observeTask(taskId: String) {
         taskEventsJob = viewModelScope.launch {
             repository.observeTaskEvents(taskId)
-                .catch { refreshTask(taskId) }
-                .collect { refreshTask(taskId) }
+                .conflate()
+                .onEach { signal ->
+                    var outcome = refreshTask(taskId)
+                    var attempt = 0L
+                    while (signal.terminal && outcome == TaskRefreshOutcome.RetryableFailure) {
+                        delay(TaskEventProtocol.retryDelayMillis(attempt++))
+                        outcome = refreshTask(taskId)
+                    }
+                }
+                .takeWhile { _state.value.task?.isTerminal() != true }
+                .catch { error ->
+                    val outcome = refreshTask(taskId)
+                    if (shouldShowTaskStreamStoppedError(
+                            refreshSucceeded = outcome == TaskRefreshOutcome.Success,
+                            taskIsTerminal = _state.value.task?.isTerminal() == true,
+                        )
+                    ) {
+                        _state.value = _state.value.copy(taskLoading = false, taskError = error.userMessage())
+                    }
+                }
+                .collect { }
         }
     }
 
@@ -615,5 +645,8 @@ class MainViewModel(private val repository: EazyPathRepository) : ViewModel() {
 }
 
 private fun TaskDetails.isTerminal(): Boolean = status in setOf("completed", "failed", "cancelled")
+private enum class TaskRefreshOutcome { Success, RetryableFailure, PermanentFailure }
+internal fun shouldShowTaskStreamStoppedError(refreshSucceeded: Boolean, taskIsTerminal: Boolean): Boolean =
+    refreshSucceeded && !taskIsTerminal
 private fun VerificationDetails.isTerminal(): Boolean = status in setOf("completed", "failed")
 private fun Throwable.userMessage(): String = message?.takeIf { it.isNotBlank() } ?: "服务暂时不可用，请检查网络后重试"

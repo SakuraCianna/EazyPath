@@ -11,6 +11,7 @@ import {
 } from '../db/index.js';
 import { fail, ok } from '../lib/api-response.js';
 import { requireUser, requireUserForAccountDeletion } from '../middleware/auth.js';
+import { taskReadSelection } from '../repositories/taskRepository.js';
 import { AccountDeletionError, deleteInstallationAccount } from '../services/account-deletion.js';
 import type { AppBindings } from '../types.js';
 
@@ -20,7 +21,7 @@ privacyRouter.get('/export', requireUser, async (c) => {
   const installationId = c.get('installationId');
   const [profile, tasks, observationRows, votes, feedback, media] = await Promise.all([
     db.select().from(userProfiles).where(eq(userProfiles.installationId, installationId)),
-    db.select().from(agentTasks).where(eq(agentTasks.installationId, installationId)),
+    db.select(taskReadSelection).from(agentTasks).where(eq(agentTasks.installationId, installationId)),
     db.select().from(observations).where(eq(observations.installationId, installationId)),
     db.select().from(communityReviewVotes).where(eq(communityReviewVotes.installationId, installationId)),
     db.select({

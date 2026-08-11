@@ -143,6 +143,7 @@ export const agentTasks = pgTable(
     profileSnapshot: jsonb('profile_snapshot').notNull(),
     parsedIntent: jsonb('parsed_intent').$type<TaskIntent>(),
     status: varchar('status', { length: 24 }).default('queued').notNull(),
+    runClaimToken: uuid('run_claim_token'),
     failureCode: varchar('failure_code', { length: 64 }),
     failureMessage: text('failure_message'),
     idempotencyKey: varchar('idempotency_key', { length: 128 }),
@@ -154,6 +155,7 @@ export const agentTasks = pgTable(
     index('idx_agent_tasks_installation_status').on(table.installationId, table.status, table.createdAt),
     uniqueIndex('uq_agent_tasks_idempotency').on(table.installationId, table.idempotencyKey),
     check('chk_agent_tasks_status', sql`${table.status} IN ('queued', 'running', 'needs_input', 'completed', 'failed', 'cancelled')`),
+    check('chk_agent_tasks_run_claim', sql`(${table.status} = 'running' AND ${table.runClaimToken} IS NOT NULL) OR (${table.status} <> 'running' AND ${table.runClaimToken} IS NULL)`),
   ],
 );
 

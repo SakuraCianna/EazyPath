@@ -57,6 +57,7 @@ CREATE TABLE "agent_tasks" (
 	"profile_snapshot" jsonb NOT NULL,
 	"parsed_intent" jsonb,
 	"status" varchar(24) DEFAULT 'queued' NOT NULL,
+	"run_claim_token" uuid,
 	"failure_code" varchar(64),
 	"failure_message" text,
 	"idempotency_key" varchar(128),
@@ -64,7 +65,8 @@ CREATE TABLE "agent_tasks" (
 	"cancelled_at" timestamp with time zone,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "chk_agent_tasks_status" CHECK ("agent_tasks"."status" IN ('queued', 'running', 'needs_input', 'completed', 'failed', 'cancelled'))
+	CONSTRAINT "chk_agent_tasks_status" CHECK ("agent_tasks"."status" IN ('queued', 'running', 'needs_input', 'completed', 'failed', 'cancelled')),
+	CONSTRAINT "chk_agent_tasks_run_claim" CHECK (("agent_tasks"."status" = 'running' AND "agent_tasks"."run_claim_token" IS NOT NULL) OR ("agent_tasks"."status" <> 'running' AND "agent_tasks"."run_claim_token" IS NULL))
 );
 --> statement-breakpoint
 CREATE TABLE "audit_events" (

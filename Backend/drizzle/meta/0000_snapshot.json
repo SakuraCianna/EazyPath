@@ -461,6 +461,12 @@
           "notNull": true,
           "default": "'queued'"
         },
+        "run_claim_token": {
+          "name": "run_claim_token",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
         "failure_code": {
           "name": "failure_code",
           "type": "varchar(64)",
@@ -578,6 +584,10 @@
         "chk_agent_tasks_status": {
           "name": "chk_agent_tasks_status",
           "value": "\"agent_tasks\".\"status\" IN ('queued', 'running', 'needs_input', 'completed', 'failed', 'cancelled')"
+        },
+        "chk_agent_tasks_run_claim": {
+          "name": "chk_agent_tasks_run_claim",
+          "value": "(\"agent_tasks\".\"status\" = 'running' AND \"agent_tasks\".\"run_claim_token\" IS NOT NULL) OR (\"agent_tasks\".\"status\" <> 'running' AND \"agent_tasks\".\"run_claim_token\" IS NULL)"
         }
       },
       "isRLSEnabled": false

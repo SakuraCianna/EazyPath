@@ -1,19 +1,21 @@
 import 'dotenv/config';
+import { randomUUID } from 'node:crypto';
 import { readFile, rm } from 'node:fs/promises';
 import { Worker, type Job } from 'bullmq';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, or } from 'drizzle-orm';
 import { getEnv, parseKeyring } from './config/env.js';
+import { canRecoverRunningAgentTask } from './domain/agent-task-recovery.js';
 import {
   agentSubtasks,
   agentTasks,
   db,
   serviceCards,
+  taskEvents,
   verificationRecords,
 } from './db/index.js';
 import { hmacSha256 } from './lib/crypto.js';
 import { redisConnectionOptions } from './queue/connection.js';
 import { TASK_QUEUE_NAME, type TaskJobData } from './queue/task-queue.js';
-import { appendTaskEvent } from './repositories/taskRepository.js';
 import { searchAmapPlaces, type AmapPlace } from './services/amap.js';
 import { AgentPlanningError, parseTravelIntent, type ParsedIntent } from './services/dashscope.js';
 import { resolvePublicActions } from './services/deeplink.js';
@@ -50,43 +52,91 @@ async function processJob(job: Job<TaskJobData>): Promise<void> {
 }
 
 async function processAgentTask(taskId: string, job: Job<TaskJobData>): Promise<void> {
-  const [task] = await db.update(agentTasks).set({ status: 'running', failureCode: null, failureMessage: null, updatedAt: new Date() }).where(and(
-    eq(agentTasks.id, taskId),
-    eq(agentTasks.status, 'queued'),
-  )).returning();
+  const canRecoverRunningTask = canRecoverRunningAgentTask(job);
+  const claimToken = randomUUID();
+  const task = await db.transaction(async (tx) => {
+    const [running] = await tx.update(agentTasks).set({ status: 'running', runClaimToken: claimToken, failureCode: null, failureMessage: null, updatedAt: new Date() }).where(and(
+      eq(agentTasks.id, taskId),
+      canRecoverRunningTask
+        ? or(eq(agentTasks.status, 'queued'), eq(agentTasks.status, 'running'))
+        : eq(agentTasks.status, 'queued'),
+    )).returning();
+    if (!running) return null;
+    await tx.insert(taskEvents).values({ taskId, eventType: 'task.running', eventData: { progress: 5 } });
+    return running;
+  });
   if (!task) return;
-  await appendTaskEvent(taskId, 'task.running', { progress: 5 });
   await job.updateProgress(5);
 
   try {
     const intent = await parseTravelIntent(task.originalContent, task.profileSnapshot, task.clientTimezone);
     if (await isTaskCancelled(taskId)) return;
-    await db.update(agentTasks).set({ parsedIntent: intent, updatedAt: new Date() }).where(eq(agentTasks.id, taskId));
-    await appendTaskEvent(taskId, 'intent.parsed', { title: intent.title, destination: intent.destination, progress: 25 });
+    const intentRecorded = await db.transaction(async (tx) => {
+      const [updated] = await tx.update(agentTasks).set({ parsedIntent: intent, updatedAt: new Date() }).where(and(
+        eq(agentTasks.id, taskId),
+        eq(agentTasks.status, 'running'),
+        eq(agentTasks.runClaimToken, claimToken),
+      )).returning({ id: agentTasks.id });
+      if (!updated) return false;
+      await tx.insert(taskEvents).values({
+        taskId,
+        eventType: 'intent.parsed',
+        eventData: { title: intent.title, destination: intent.destination, progress: 25 },
+      });
+      return true;
+    });
+    if (!intentRecorded) return;
     await job.updateProgress(25);
 
-    await db.delete(agentSubtasks).where(eq(agentSubtasks.taskId, taskId));
-    const subtaskRows = await db.insert(agentSubtasks).values(intent.tasks.map((item) => ({
-      taskId,
-      externalKey: item.id,
-      category: item.category,
-      title: item.title,
-      dependsOn: item.dependsOn,
-      params: item.params,
-      status: 'running',
-    }))).returning();
+    const subtaskRows = await db.transaction(async (tx) => {
+      const [claimedTask] = await lockClaimedAgentTask(tx, taskId, claimToken);
+      if (!claimedTask) return null;
+      await tx.delete(agentSubtasks).where(eq(agentSubtasks.taskId, taskId));
+      return tx.insert(agentSubtasks).values(intent.tasks.map((item) => ({
+        taskId,
+        externalKey: item.id,
+        category: item.category,
+        title: item.title,
+        dependsOn: item.dependsOn,
+        params: item.params,
+        status: 'running',
+      }))).returning();
+    });
+    if (!subtaskRows) return;
 
-    await db.delete(serviceCards).where(eq(serviceCards.taskId, taskId));
+    const cardsReset = await db.transaction(async (tx) => {
+      const [claimedTask] = await lockClaimedAgentTask(tx, taskId, claimToken);
+      if (!claimedTask) return false;
+      await tx.delete(serviceCards).where(eq(serviceCards.taskId, taskId));
+      return true;
+    });
+    if (!cardsReset) return;
     const cards = await buildServiceCards(taskId, intent, subtaskRows.map((row) => ({ id: row.id, key: row.externalKey, category: row.category })));
     if (await isTaskCancelled(taskId)) return;
     for (const card of cards) {
-      const [created] = await db.insert(serviceCards).values(card).returning();
-      if (created) await appendTaskEvent(taskId, 'card.upserted', { card: created, progress: 75 });
+      const cardWritten = await db.transaction(async (tx) => {
+        const [activeTask] = await lockClaimedAgentTask(tx, taskId, claimToken);
+        if (!activeTask) return false;
+        const [created] = await tx.insert(serviceCards).values(card).returning();
+        if (created) {
+          await tx.insert(taskEvents).values({ taskId, eventType: 'card.upserted', eventData: { card: created, progress: 75 } });
+        }
+        return true;
+      });
+      if (!cardWritten) return;
     }
-    await db.update(agentSubtasks).set({ status: 'completed', updatedAt: new Date() }).where(eq(agentSubtasks.taskId, taskId));
-    const [completed] = await db.update(agentTasks).set({ status: 'completed', completedAt: new Date(), updatedAt: new Date() }).where(and(eq(agentTasks.id, taskId), eq(agentTasks.status, 'running'))).returning({ id: agentTasks.id });
+    const completed = await db.transaction(async (tx) => {
+      const [updated] = await tx.update(agentTasks).set({ status: 'completed', runClaimToken: null, completedAt: new Date(), updatedAt: new Date() }).where(and(
+        eq(agentTasks.id, taskId),
+        eq(agentTasks.status, 'running'),
+        eq(agentTasks.runClaimToken, claimToken),
+      )).returning({ id: agentTasks.id });
+      if (!updated) return null;
+      await tx.update(agentSubtasks).set({ status: 'completed', updatedAt: new Date() }).where(eq(agentSubtasks.taskId, taskId));
+      await tx.insert(taskEvents).values({ taskId, eventType: 'task.completed', eventData: { progress: 100, card_count: cards.length } });
+      return updated;
+    });
     if (!completed) return;
-    await appendTaskEvent(taskId, 'task.completed', { progress: 100, card_count: cards.length });
     await job.updateProgress(100);
   } catch (error) {
     const known = error instanceof AgentPlanningError;
@@ -95,10 +145,32 @@ async function processAgentTask(taskId: string, job: Job<TaskJobData>): Promise<
     const retryable = known ? error.retryable : true;
     const finalAttempt = job.attemptsMade + 1 >= (job.opts.attempts ?? 1);
     const nextStatus = retryable && !finalAttempt ? 'queued' : 'failed';
-    const [updated] = await db.update(agentTasks).set({ status: nextStatus, failureCode, failureMessage: message, updatedAt: new Date() }).where(and(eq(agentTasks.id, taskId), eq(agentTasks.status, 'running'))).returning({ id: agentTasks.id });
-    if (updated) await appendTaskEvent(taskId, finalAttempt ? 'task.failed' : 'task.retrying', { code: failureCode, message, retryable, attempt: job.attemptsMade + 1 });
+    await db.transaction(async (tx) => {
+      const [updated] = await tx.update(agentTasks).set({ status: nextStatus, runClaimToken: null, failureCode, failureMessage: message, updatedAt: new Date() }).where(and(
+        eq(agentTasks.id, taskId),
+        eq(agentTasks.status, 'running'),
+        eq(agentTasks.runClaimToken, claimToken),
+      )).returning({ id: agentTasks.id });
+      if (updated) {
+        await tx.insert(taskEvents).values({
+          taskId,
+          eventType: finalAttempt ? 'task.failed' : 'task.retrying',
+          eventData: { code: failureCode, message, retryable, attempt: job.attemptsMade + 1 },
+        });
+      }
+    });
     throw error;
   }
+}
+
+type AgentTaskTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+function lockClaimedAgentTask(tx: AgentTaskTransaction, taskId: string, claimToken: string) {
+  return tx.select({ id: agentTasks.id }).from(agentTasks).where(and(
+    eq(agentTasks.id, taskId),
+    eq(agentTasks.status, 'running'),
+    eq(agentTasks.runClaimToken, claimToken),
+  )).for('update').limit(1);
 }
 
 async function isTaskCancelled(taskId: string): Promise<boolean> {
