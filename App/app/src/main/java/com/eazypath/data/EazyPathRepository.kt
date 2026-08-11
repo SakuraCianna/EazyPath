@@ -4,7 +4,11 @@ import android.content.Context
 import android.graphics.Rect
 import android.net.Uri
 import com.eazypath.BuildConfig
+import com.eazypath.data.location.DeviceLocation
 import com.eazypath.data.location.OneShotLocationProvider
+import com.eazypath.data.map.AmapWalkingRoutePlanner
+import com.eazypath.data.map.OrdinaryWalkingRoute
+import com.eazypath.data.map.RouteCoordinate
 import com.eazypath.data.media.EvidenceImageAnalysis
 import com.eazypath.data.media.EvidenceImageRedactor
 import com.eazypath.data.media.PreparedEvidence
@@ -15,12 +19,14 @@ import com.eazypath.data.network.CreateTaskRequest
 import com.eazypath.data.network.EazyPathApiService
 import com.eazypath.data.network.FeatureDefinition
 import com.eazypath.data.network.InteractionProfile
+import com.eazypath.data.network.LinkResolveRequest
 import com.eazypath.data.network.LocationProofData
 import com.eazypath.data.network.LocationProofRequest
 import com.eazypath.data.network.MobilityProfile
 import com.eazypath.data.network.NetworkClient
 import com.eazypath.data.network.ObservationData
 import com.eazypath.data.network.ObservationRequest
+import com.eazypath.data.network.PlaceDetails
 import com.eazypath.data.network.PlaceSearchItem
 import com.eazypath.data.network.ProfileData
 import com.eazypath.data.network.RefreshRequest
@@ -28,6 +34,7 @@ import com.eazypath.data.network.RegisterRequest
 import com.eazypath.data.network.ReviewTask
 import com.eazypath.data.network.ReviewTaskPage
 import com.eazypath.data.network.ReviewSubmissionData
+import com.eazypath.data.network.ServiceAction
 import com.eazypath.data.network.TaskDetails
 import com.eazypath.data.network.UpdateProfileRequest
 import com.eazypath.data.network.UploadInitializeRequest
@@ -59,6 +66,7 @@ class EazyPathRepository(private val context: Context) {
     private val sessionMutex = Mutex()
     private val network = NetworkClient { sessionStore.readSafely()?.accessToken }
     private val locationProvider = OneShotLocationProvider(context)
+    private val walkingRoutePlanner = AmapWalkingRoutePlanner(context)
     private val publicApi: EazyPathApiService = network.publicApi
     private val api: EazyPathApiService = network.authenticatedApi
 
@@ -183,6 +191,30 @@ class EazyPathRepository(private val context: Context) {
         ensureSession()
         return api.searchPlaces(query.trim()).requireData()
     }
+
+    suspend fun getPlaceDetails(placeId: String): PlaceDetails {
+        ensureSession()
+        return api.getPlaceDetails(placeId).requireData()
+    }
+
+    suspend fun resolveAmapActions(place: PlaceSearchItem): List<ServiceAction> {
+        ensureSession()
+        return api.resolveLinkActions(
+            LinkResolveRequest(
+                destinationName = place.name,
+                longitude = place.longitude,
+                latitude = place.latitude,
+                accessibilityNotes = "高德未提供轮椅路线模式，请结合 EazyPath 地点证据和现场情况复核",
+            ),
+        ).requireData().actions
+    }
+
+    suspend fun locateOnceForMap(): DeviceLocation = locationProvider.locateAfterPrivacyConsent()
+
+    suspend fun planOrdinaryWalkingRoute(
+        origin: RouteCoordinate,
+        destination: RouteCoordinate,
+    ): OrdinaryWalkingRoute = walkingRoutePlanner.plan(origin, destination)
 
     suspend fun getEvidenceFeatureDefinitions(): List<FeatureDefinition> {
         ensureSession()

@@ -1,12 +1,7 @@
 package com.eazypath.ui.screens
 
-import android.content.ClipData
-import android.content.ClipboardManager
 import android.content.Context
-import android.content.Intent
-import android.net.Uri
 import android.speech.tts.TextToSpeech
-import android.widget.Toast
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -21,6 +16,7 @@ import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.RecordVoiceOver
 import androidx.compose.material3.Button
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -45,8 +41,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.eazypath.data.network.ServiceAction
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.eazypath.data.network.ServiceCard
+import com.eazypath.ui.components.ExternalActionResult
+import com.eazypath.ui.components.executeActionWithFallback
 import com.eazypath.ui.viewmodels.MainViewModel
 import java.util.Locale
 
@@ -55,12 +55,31 @@ import java.util.Locale
 fun TravelChainScreen(prompt: String, viewModel: MainViewModel, onBack: () -> Unit) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     var tts by remember { mutableStateOf<TextToSpeech?>(null) }
+    var externalPending by remember { mutableStateOf(false) }
+    var externalPaused by remember { mutableStateOf(false) }
+    var showExternalResult by remember { mutableStateOf(false) }
     DisposableEffect(Unit) {
         tts = TextToSpeech(context) { status -> if (status == TextToSpeech.SUCCESS) tts?.language = Locale.SIMPLIFIED_CHINESE }
         onDispose { tts?.shutdown() }
     }
     LaunchedEffect(prompt) { viewModel.createTravelTask(prompt) }
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_PAUSE -> if (externalPending) externalPaused = true
+                Lifecycle.Event.ON_RESUME -> if (externalPending && externalPaused) {
+                    externalPending = false
+                    externalPaused = false
+                    showExternalResult = true
+                }
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     Scaffold(topBar = { TopAppBar(title = { Text("无障碍出行链") }, navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, "返回") } }) }) { padding ->
         LazyColumn(Modifier.fillMaxSize().padding(padding).padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -81,15 +100,36 @@ fun TravelChainScreen(prompt: String, viewModel: MainViewModel, onBack: () -> Un
                         OutlinedButton(onClick = { tts?.speak(taskSummary(task), TextToSpeech.QUEUE_FLUSH, null, "task-summary") }) { Icon(Icons.Default.RecordVoiceOver, null); Text("播报") }
                     }
                 }
-                items(task.cards, key = { it.id }) { card -> ServiceCardView(card, context) }
+                items(task.cards, key = { it.id }) { card ->
+                    ServiceCardView(
+                        card = card,
+                        context = context,
+                        onExternalLaunch = { externalPending = true },
+                        onExternalLaunchCancelled = { externalPending = false },
+                    )
+                }
                 if (task.cards.isEmpty() && task.status == "completed") item { ErrorCard("任务已完成，但没有可展示的真实候选。请修改地点或条件后重试。") { viewModel.retryCurrentTask() } }
             }
         }
     }
+    if (showExternalResult) {
+        AlertDialog(
+            onDismissRequest = { showExternalResult = false },
+            title = { Text("平台操作完成了吗？") },
+            text = { Text("第三方平台的结果不会自动回写 EazyPath。未完成时可以再次打开网页或点击复制沟通卡。") },
+            confirmButton = { Button(onClick = { showExternalResult = false }) { Text("已完成") } },
+            dismissButton = { OutlinedButton(onClick = { showExternalResult = false }) { Text("尚未完成") } },
+        )
+    }
 }
 
 @Composable
-private fun ServiceCardView(card: ServiceCard, context: Context) {
+private fun ServiceCardView(
+    card: ServiceCard,
+    context: Context,
+    onExternalLaunch: () -> Unit,
+    onExternalLaunchCancelled: () -> Unit,
+) {
     Card(shape = RoundedCornerShape(18.dp), elevation = CardDefaults.cardElevation(1.dp)) {
         Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text(card.category.uppercase(), color = MaterialTheme.colorScheme.primary, fontSize = 11.sp, fontWeight = FontWeight.Black)
@@ -97,8 +137,13 @@ private fun ServiceCardView(card: ServiceCard, context: Context) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) { StatusPill(card.status); StatusPill("风险 ${card.riskLevel}") }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) { Icon(Icons.Default.Info, null, tint = MaterialTheme.colorScheme.primary); Text(card.riskMessage, fontSize = 13.sp) }
             card.actions.forEach { action ->
-                if (action.type == "app_uri" || action.type == "web") Button(onClick = { executeAction(context, action) }, modifier = Modifier.fillMaxWidth()) { Text(action.label) }
-                else OutlinedButton(onClick = { executeAction(context, action) }, modifier = Modifier.fillMaxWidth()) { Text(action.label) }
+                val click = {
+                    if (action.type != "clipboard") onExternalLaunch()
+                    val result = executeActionWithFallback(context, card.actions, action)
+                    if (result != ExternalActionResult.LAUNCHED) onExternalLaunchCancelled()
+                }
+                if (action.type == "app_uri" || action.type == "web") Button(onClick = click, modifier = Modifier.fillMaxWidth()) { Text(action.label) }
+                else OutlinedButton(onClick = click, modifier = Modifier.fillMaxWidth()) { Text(action.label) }
             }
         }
     }
@@ -113,21 +158,6 @@ private fun StatusPill(text: String) {
 private fun ErrorCard(message: String, retry: () -> Unit) {
     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer), shape = RoundedCornerShape(16.dp)) {
         Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) { Text(message, color = MaterialTheme.colorScheme.onErrorContainer); Button(onClick = retry) { Text("重试") } }
-    }
-}
-
-private fun executeAction(context: Context, action: ServiceAction) {
-    when (action.type) {
-        "app_uri", "web" -> {
-            val url = action.url ?: return
-            runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
-                .onFailure { Toast.makeText(context, "无法打开目标平台，请使用沟通卡", Toast.LENGTH_LONG).show() }
-        }
-        "clipboard" -> {
-            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-            clipboard.setPrimaryClip(ClipData.newPlainText("EazyPath 无障碍沟通卡", action.content.orEmpty()))
-            Toast.makeText(context, "沟通卡已复制", Toast.LENGTH_SHORT).show()
-        }
     }
 }
 
