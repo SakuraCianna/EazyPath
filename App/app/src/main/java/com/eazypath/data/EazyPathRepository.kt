@@ -3,6 +3,7 @@ package com.eazypath.data
 import android.content.Context
 import android.graphics.Rect
 import android.net.Uri
+import android.util.Log
 import com.eazypath.BuildConfig
 import com.eazypath.data.location.DeviceLocation
 import com.eazypath.data.location.OneShotLocationProvider
@@ -36,6 +37,9 @@ import com.eazypath.data.network.ReviewTaskPage
 import com.eazypath.data.network.ReviewSubmissionData
 import com.eazypath.data.network.ServiceAction
 import com.eazypath.data.network.TaskDetails
+import com.eazypath.data.network.TaskEventAuthenticationRecovery
+import com.eazypath.data.network.TaskEventProtocol
+import com.eazypath.data.network.TaskEventSignal
 import com.eazypath.data.network.UpdateProfileRequest
 import com.eazypath.data.network.UploadInitializeRequest
 import com.eazypath.data.network.VerificationDetails
@@ -44,11 +48,18 @@ import com.eazypath.data.security.InstallationIdentity
 import com.eazypath.data.security.SecureSessionStore
 import com.eazypath.data.security.StoredSession
 import com.google.gson.JsonElement
+import java.io.IOException
 import java.security.MessageDigest
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicLong
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.flow.emitAll
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.retryWhen
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import okhttp3.MediaType.Companion.toMediaType
@@ -60,6 +71,7 @@ import okhttp3.ResponseBody
 import okhttp3.sse.EventSource
 import okhttp3.sse.EventSourceListener
 import okhttp3.sse.EventSources
+import retrofit2.HttpException
 class EazyPathRepository(private val context: Context) {
     private val identity = InstallationIdentity(context)
     private val sessionStore = SecureSessionStore(context)
@@ -106,32 +118,95 @@ class EazyPathRepository(private val context: Context) {
 
     suspend fun getTask(taskId: String): TaskDetails {
         ensureSession()
-        return api.getTask(taskId).requireData()
+        return try {
+            api.getTask(taskId).requireData()
+        } catch (error: HttpException) {
+            if (error.code() != 401) throw error
+            refreshSessionAfterUnauthorized()
+            api.getTask(taskId).requireData()
+        }
     }
 
-    fun observeTaskEvents(taskId: String): Flow<Unit> = callbackFlow {
+    fun observeTaskEvents(taskId: String): Flow<TaskEventSignal> {
+        val cursor = AtomicLong(0)
+        val authenticationRecovery = TaskEventAuthenticationRecovery()
+        return flow {
+            ensureSession()
+            emitAll(openTaskEventStream(taskId, cursor, authenticationRecovery))
+        }.retryWhen { cause, attempt ->
+            if (cause is CancellationException) return@retryWhen false
+            if (cause is TaskEventStreamException && !cause.isRetryable()) return@retryWhen false
+            if (cause is TaskEventStreamException && cause.statusCode == 401) {
+                if (!authenticationRecovery.tryStartRecovery()) return@retryWhen false
+                refreshSessionAfterUnauthorized()
+            }
+            delay(TaskEventProtocol.retryDelayMillis(attempt))
+            true
+        }
+    }
+
+    private fun openTaskEventStream(
+        taskId: String,
+        cursor: AtomicLong,
+        authenticationRecovery: TaskEventAuthenticationRecovery,
+    ): Flow<TaskEventSignal> = callbackFlow {
         val request = Request.Builder()
-            .url("${BuildConfig.API_BASE_URL.ensureTrailingSlash()}api/v1/tasks/$taskId/events")
+            .url("${BuildConfig.API_BASE_URL.ensureTrailingSlash()}api/v1/tasks/$taskId/events?after=${cursor.get()}")
             .header("Accept", "text/event-stream")
+            .apply { if (cursor.get() > 0) header("Last-Event-ID", cursor.get().toString()) }
             .apply { sessionStore.readSafely()?.accessToken?.let { header("Authorization", "Bearer $it") } }
             .build()
+        var terminalSeen = false
         val source = EventSources.createFactory(network.eventClient).newEventSource(
             request,
             object : EventSourceListener() {
-                override fun onEvent(eventSource: EventSource, id: String?, type: String?, data: String) {
-                    trySend(Unit)
+                override fun onOpen(eventSource: EventSource, response: Response) {
+                    authenticationRecovery.markStreamHealthy()
                 }
 
-                override fun onFailure(eventSource: EventSource, throwable: Throwable?, response: Response?) {
-                    close(throwable ?: IllegalStateException("任务事件连接已断开"))
+                override fun onEvent(eventSource: EventSource, id: String?, type: String?, data: String) {
+                    val signal = TaskEventProtocol.parse(taskId, cursor.get(), id, type, data)
+                    if (signal == null) {
+                        if (type != "heartbeat") Log.w("TaskEventProtocol", "忽略不兼容任务事件: ${type?.take(64) ?: "missing-type"}")
+                        return
+                    }
+                    val delivered = trySend(signal)
+                    if (delivered.isFailure) {
+                        close(TaskEventStreamException(null, delivered.exceptionOrNull()))
+                        return
+                    }
+                    if (signal.type == "stream.reset") cursor.set(signal.id)
+                    else cursor.updateAndGet { previous -> maxOf(previous, signal.id) }
+                    authenticationRecovery.markStreamHealthy()
+                    terminalSeen = signal.terminal
+                    if (terminalSeen) close()
+                }
+
+                override fun onFailure(eventSource: EventSource, t: Throwable?, response: Response?) {
+                    close(TaskEventStreamException(response?.code, t))
                 }
 
                 override fun onClosed(eventSource: EventSource) {
-                    close()
+                    if (terminalSeen) close() else close(TaskEventStreamException(null, null))
                 }
             },
         )
         awaitClose { source.cancel() }
+    }
+
+    private suspend fun refreshSessionAfterUnauthorized() {
+        sessionMutex.withLock {
+            val current = sessionStore.readSafely()
+            val refreshed = current?.let {
+                runCatching { publicApi.refresh(RefreshRequest(it.refreshToken)).requireData() }.getOrNull()
+            }
+            if (refreshed != null) {
+                sessionStore.write(refreshed.accessToken, refreshed.refreshToken, refreshed.accessTokenExpiresIn)
+            } else {
+                sessionStore.clear()
+                registerInstallation()
+            }
+        }
     }
 
     suspend fun createVerification(uri: Uri, scene: String): Pair<String, String> {
@@ -300,6 +375,14 @@ class EazyPathRepository(private val context: Context) {
     private fun String.ensureTrailingSlash(): String = if (endsWith('/')) this else "$this/"
 }
 
+private class TaskEventStreamException(
+    val statusCode: Int?,
+    cause: Throwable?,
+) : IllegalStateException("任务事件连接已断开", cause) {
+    fun isRetryable(): Boolean = statusCode == null || statusCode == 401 || statusCode == 408 ||
+        statusCode == 429 || (statusCode in 500..599)
+}
+
 private fun ByteArray.sha256Hex(): String = MessageDigest.getInstance("SHA-256")
     .digest(this)
     .joinToString("") { byte -> "%02x".format(byte) }
@@ -308,6 +391,12 @@ internal fun evidenceUploadIdempotencyKey(uploadDraftId: String, wholeHash: Stri
     "android-evidence-$uploadDraftId-$wholeHash"
 
 class ApiException(val code: String, message: String) : IllegalStateException(message)
+
+internal fun isRetryableTaskSnapshotError(error: Throwable): Boolean = when (error) {
+    is IOException -> true
+    is HttpException -> error.code() == 408 || error.code() == 429 || error.code() in 500..599
+    else -> false
+}
 
 private fun <T> ApiEnvelope<T>.requireData(): T {
     if (code != "OK" || data == null) throw ApiException(code, message)

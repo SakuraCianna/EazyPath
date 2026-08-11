@@ -16,6 +16,24 @@ export interface CreateTaskInput {
   idempotencyKey?: string | undefined;
 }
 
+export const taskReadSelection = {
+  id: agentTasks.id,
+  installationId: agentTasks.installationId,
+  inputType: agentTasks.inputType,
+  originalContent: agentTasks.originalContent,
+  clientTimezone: agentTasks.clientTimezone,
+  profileVersion: agentTasks.profileVersion,
+  profileSnapshot: agentTasks.profileSnapshot,
+  parsedIntent: agentTasks.parsedIntent,
+  status: agentTasks.status,
+  failureCode: agentTasks.failureCode,
+  failureMessage: agentTasks.failureMessage,
+  completedAt: agentTasks.completedAt,
+  cancelledAt: agentTasks.cancelledAt,
+  createdAt: agentTasks.createdAt,
+  updatedAt: agentTasks.updatedAt,
+};
+
 export async function createTask(input: CreateTaskInput) {
   if (input.idempotencyKey) {
     const [existing] = await db
@@ -87,7 +105,7 @@ export async function appendTaskEvent(
 
 export async function getTaskForInstallation(taskId: string, installationId: string) {
   const [task] = await db
-    .select()
+    .select(taskReadSelection)
     .from(agentTasks)
     .where(and(eq(agentTasks.id, taskId), eq(agentTasks.installationId, installationId)))
     .limit(1);
@@ -100,6 +118,15 @@ export async function getTaskForInstallation(taskId: string, installationId: str
   return { ...task, cards };
 }
 
+export async function getTaskIdentityForInstallation(taskId: string, installationId: string) {
+  const [task] = await db
+    .select({ id: agentTasks.id })
+    .from(agentTasks)
+    .where(and(eq(agentTasks.id, taskId), eq(agentTasks.installationId, installationId)))
+    .limit(1);
+  return task ?? null;
+}
+
 export async function getTaskEvents(taskId: string, afterEventId: number, limit = 100) {
   return db
     .select()
@@ -109,9 +136,28 @@ export async function getTaskEvents(taskId: string, afterEventId: number, limit 
     .limit(limit);
 }
 
+export async function getTaskEventCursor(taskId: string, eventId: number) {
+  const [event] = await db
+    .select({ id: taskEvents.id, occurredAt: taskEvents.occurredAt })
+    .from(taskEvents)
+    .where(and(eq(taskEvents.taskId, taskId), eq(taskEvents.id, eventId)))
+    .limit(1);
+  return event ?? null;
+}
+
+export async function getLatestTaskEventId(taskId: string): Promise<number> {
+  const [event] = await db
+    .select({ id: taskEvents.id })
+    .from(taskEvents)
+    .where(eq(taskEvents.taskId, taskId))
+    .orderBy(desc(taskEvents.id))
+    .limit(1);
+  return event?.id ?? 0;
+}
+
 export async function listTasks(installationId: string, limit = 20) {
   return db
-    .select()
+    .select(taskReadSelection)
     .from(agentTasks)
     .where(eq(agentTasks.installationId, installationId))
     .orderBy(desc(agentTasks.createdAt))

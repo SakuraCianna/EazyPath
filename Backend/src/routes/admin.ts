@@ -21,6 +21,7 @@ import {
 import { ADMIN_PERMISSION_CODES } from '../domain/admin-security.js';
 import { fail, ok } from '../lib/api-response.js';
 import { taskQueue } from '../queue/task-queue.js';
+import { taskReadSelection } from '../repositories/taskRepository.js';
 import {
   createAdminRole,
   createAdminUser,
@@ -119,7 +120,7 @@ adminRouter.post('/platform-links', requireAdminPermission('platform_links.manag
   return ok(c, record, '平台配置已保存');
 });
 
-adminRouter.get('/tasks', requireAdminPermission('tasks.read'), async (c) => ok(c, await db.select().from(agentTasks).orderBy(desc(agentTasks.createdAt)).limit(100)));
+adminRouter.get('/tasks', requireAdminPermission('tasks.read'), async (c) => ok(c, await db.select(taskReadSelection).from(agentTasks).orderBy(desc(agentTasks.createdAt)).limit(100)));
 adminRouter.get('/installations', requireAdminPermission('installations.read'), async (c) => ok(c, await db.select({
   id: installationAccounts.id,
   installationGuid: installationAccounts.installationGuid,
