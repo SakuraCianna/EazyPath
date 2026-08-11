@@ -95,8 +95,10 @@ export async function setAiConsent(
 export async function hasActiveAiConsent(installationId: string, capability: AiCapability): Promise<boolean> {
   const [record] = await db.select({ id: aiProcessingConsents.id })
     .from(aiProcessingConsents)
+    .innerJoin(installationAccounts, eq(installationAccounts.id, aiProcessingConsents.installationId))
     .where(and(
       eq(aiProcessingConsents.installationId, installationId),
+      eq(installationAccounts.status, 'active'),
       eq(aiProcessingConsents.capability, capability),
       eq(aiProcessingConsents.policyVersion, AI_CONSENT_POLICY_VERSION),
       sql`${aiProcessingConsents.grantedAt} IS NOT NULL`,

@@ -1,5 +1,6 @@
 import 'dotenv/config';
-import { serve } from '@hono/node-server';
+import { serve, type WebSocketServerLike } from '@hono/node-server';
+import { WebSocketServer } from 'ws';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { secureHeaders } from 'hono/secure-headers';
@@ -19,15 +20,20 @@ import { privacyRouter } from './routes/privacy.js';
 import { profileRouter } from './routes/profile.js';
 import { tasksRouter } from './routes/tasks.js';
 import { verificationsRouter } from './routes/verifications.js';
+import { voiceRouter } from './routes/voice.js';
 import { prepareMediaDirectories } from './services/media-storage.js';
 import { closeAdminLoginGuard } from './services/admin-login-guard.js';
 import { closeCommunityReviewGuard } from './services/community-review-guard.js';
 import { closeTaskEventStreamGuard } from './services/task-event-stream-guard.js';
+import { closeVoiceStreamGuard } from './services/voice-stream-guard.js';
 import type { AppBindings } from './types.js';
 
 const env = getEnv();
 const allowedOrigins = new Set(env.CORS_ALLOWED_ORIGINS.split(',').map((origin) => origin.trim()));
 const app = new Hono<AppBindings>();
+const webSocketServer = new WebSocketServer({ noServer: true, perMessageDeflate: false, maxPayload: 64 * 1024 });
+// @hono/node-server 与 @types/ws 的重载声明不完全同构；adapter 运行时仍会校验 noServer 必须为 true。
+const adapterWebSocketServer = webSocketServer as unknown as WebSocketServerLike;
 
 app.use('*', async (c, next) => {
   const requestId = c.req.header('x-request-id')?.slice(0, 64) || `req_${crypto.randomUUID()}`;
@@ -65,6 +71,7 @@ app.route('/api/v1/media', mediaRouter);
 app.route('/api/v1/privacy', privacyRouter);
 app.route('/api/v1/admin/auth', adminAuthRouter);
 app.route('/api/v1/admin', adminRouter);
+app.route('/ws', voiceRouter);
 
 app.get('/health/live', (c) => ok(c, { status: 'ok', service: 'eazypath-api', version: '2.0.0' }));
 app.get('/health/ready', async (c) => {
@@ -83,13 +90,21 @@ app.onError((error, c) => {
 async function main(): Promise<void> {
   await prepareMediaDirectories();
   await registerMaintenanceSchedules();
-  serve({ fetch: app.fetch, port: env.PORT });
+  serve({ fetch: app.fetch, port: env.PORT, websocket: { server: adapterWebSocketServer } });
   console.info(JSON.stringify({ level: 'info', event: 'server.ready', port: env.PORT }));
 }
 
 async function shutdown(signal: string): Promise<void> {
   console.info(JSON.stringify({ level: 'info', event: 'server.shutdown', signal }));
-  await Promise.all([taskQueue.close(), closeAdminLoginGuard(), closeCommunityReviewGuard(), closeTaskEventStreamGuard(), queryClient.end()]);
+  for (const client of webSocketServer.clients) client.close(1001, 'server shutdown');
+  await Promise.all([
+    taskQueue.close(),
+    closeAdminLoginGuard(),
+    closeCommunityReviewGuard(),
+    closeTaskEventStreamGuard(),
+    closeVoiceStreamGuard(),
+    queryClient.end(),
+  ]);
   process.exit(0);
 }
 
