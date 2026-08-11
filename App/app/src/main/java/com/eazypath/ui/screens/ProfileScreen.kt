@@ -17,6 +17,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
@@ -35,6 +36,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.eazypath.data.network.InteractionProfile
 import com.eazypath.data.network.MobilityProfile
+import com.eazypath.ui.components.AiConsentDialog
 import com.eazypath.ui.viewmodels.MainViewModel
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -50,7 +52,11 @@ fun ProfileScreen(viewModel: MainViewModel, onBack: () -> Unit) {
     var avoidUnknown by remember(profile?.version) { mutableStateOf(profile?.mobility?.avoidUnverifiedSegments ?: true) }
     var largeText by remember(profile?.version) { mutableStateOf(profile?.interaction?.largeText ?: true) }
     var voiceOutput by remember(profile?.version) { mutableStateOf(profile?.interaction?.preferVoiceOutput ?: true) }
-    LaunchedEffect(Unit) { if (profile == null) viewModel.loadProfile() }
+    var selectedConsentCapability by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(Unit) {
+        if (profile == null) viewModel.loadProfile()
+        if (state.aiConsents.isEmpty()) viewModel.loadAiConsents()
+    }
 
     Scaffold(topBar = { TopAppBar(title = { Text("我的无障碍偏好") }, navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, "返回") } }) }) { padding ->
         Column(Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
@@ -66,6 +72,30 @@ fun ProfileScreen(viewModel: MainViewModel, onBack: () -> Unit) {
             PreferenceCard("交互与播报") {
                 ToggleRow("大字模式", largeText) { largeText = it }
                 ToggleRow("自动语音播报结果", voiceOutput) { voiceOutput = it }
+            }
+            PreferenceCard("AI 处理与隐私") {
+                Text("四类能力分别管理。撤回某一项不会影响其他功能。", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                state.aiConsents.forEach { consent ->
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Column(Modifier.weight(1f)) {
+                            Text(consent.title, fontWeight = FontWeight.Bold)
+                            Text(
+                                when (consent.decision) {
+                                    "granted" -> "已同意 · 可随时撤回"
+                                    "denied" -> "已拒绝 · 使用替代方式"
+                                    "revoked" -> "已撤回 · 使用替代方式"
+                                    "expired" -> "说明已更新 · 需要重新选择"
+                                    else -> "尚未选择"
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = if (consent.granted) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        OutlinedButton(onClick = { selectedConsentCapability = consent.capability }) { Text("查看与管理") }
+                    }
+                }
+                if (state.aiConsentsLoading) Text("正在读取隐私选择…")
+                state.aiConsentError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             }
             state.sessionError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             Button(
@@ -95,6 +125,21 @@ fun ProfileScreen(viewModel: MainViewModel, onBack: () -> Unit) {
                 modifier = Modifier.fillMaxWidth(),
             ) { Text(if (state.profileSaving) "保存中…" else "保存偏好") }
         }
+    }
+    val selectedConsent = state.aiConsents.firstOrNull { it.capability == selectedConsentCapability }
+    if (selectedConsent != null) {
+        AiConsentDialog(
+            consent = selectedConsent,
+            updating = state.aiConsentUpdatingCapability == selectedConsent.capability,
+            onAgree = { viewModel.setAiConsent(selectedConsent.capability, true) },
+            onRevoke = { viewModel.setAiConsent(selectedConsent.capability, false) },
+            onDecline = {
+                viewModel.setAiConsent(selectedConsent.capability, false) {
+                    selectedConsentCapability = null
+                }
+            },
+            onDismiss = { selectedConsentCapability = null },
+        )
     }
 }
 

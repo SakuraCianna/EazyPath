@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { getEnv } from '../config/env.js';
+import { minimizeAgentContent, minimizeAgentProfile } from '../domain/agent-data-minimization.js';
 
 export const ParsedIntentSchema = z.object({
   title: z.string().min(1).max(160),
@@ -49,6 +50,8 @@ export async function parseTravelIntent(
   timezone: string,
 ): Promise<ParsedIntent> {
   const env = getEnv();
+  const minimizedContent = minimizeAgentContent(content);
+  const minimizedProfile = minimizeAgentProfile(profileSnapshot);
   const response = await fetch('https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions', {
     method: 'POST',
     headers: {
@@ -62,9 +65,9 @@ export async function parseTravelIntent(
       messages: [
         {
           role: 'system',
-          content: `你是 EazyPath 无障碍出行 Agent。仅输出 JSON。服务对象是轮椅或行动不便用户。不得声称地图原生支持轮椅路线，不得把未知信息写成已满足。当前时区: ${timezone}。用户偏好快照: ${JSON.stringify(profileSnapshot)}。输出字段必须包含 title、origin、destination、startDate、endDate、constraints 和 tasks；tasks 类型仅可为 rail、ride、route、hotel、dining、verification，并给出 DAG dependsOn。`,
+          content: `你是 EazyPath 无障碍出行 Agent。仅输出 JSON。服务对象是轮椅或行动不便用户。不得声称地图原生支持轮椅路线，不得把未知信息写成已满足。当前时区: ${timezone}。最小化用户偏好: ${JSON.stringify(minimizedProfile)}。输出字段必须包含 title、origin、destination、startDate、endDate、constraints 和 tasks；tasks 类型仅可为 rail、ride、route、hotel、dining、verification，并给出 DAG dependsOn。`,
         },
-        { role: 'user', content },
+        { role: 'user', content: minimizedContent },
       ],
     }),
     signal: AbortSignal.timeout(25_000),

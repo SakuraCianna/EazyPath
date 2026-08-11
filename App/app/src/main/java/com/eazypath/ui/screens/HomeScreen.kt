@@ -37,6 +37,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -47,6 +48,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.eazypath.ui.viewmodels.MainViewModel
+import com.eazypath.ui.components.AiConsentDialog
 import java.util.Locale
 
 @Composable
@@ -61,6 +63,17 @@ fun HomeScreen(
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     var prompt by remember { mutableStateOf("") }
+    var showAgentConsent by remember { mutableStateOf(false) }
+    var pendingPrompt by remember { mutableStateOf<String?>(null) }
+    val agentConsent = state.aiConsents.firstOrNull { it.capability == "agent" }
+    LaunchedEffect(agentConsent?.granted, pendingPrompt) {
+        val confirmedPrompt = pendingPrompt
+        if (agentConsent?.granted == true && confirmedPrompt != null) {
+            pendingPrompt = null
+            showAgentConsent = false
+            onCreateTask(confirmedPrompt)
+        }
+    }
     val voiceLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         if (result.resultCode == Activity.RESULT_OK) {
             prompt = result.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull().orEmpty()
@@ -114,7 +127,19 @@ fun HomeScreen(
                         OutlinedButton(onClick = { permissionLauncher.launch(Manifest.permission.RECORD_AUDIO) }, modifier = Modifier.weight(1f)) {
                             Icon(Icons.Default.Mic, contentDescription = null); Text("语音输入")
                         }
-                        Button(onClick = { onCreateTask(prompt.trim()) }, enabled = prompt.trim().length >= 2, modifier = Modifier.weight(1f)) { Text("开始规划") }
+                        Button(
+                            onClick = {
+                                val content = prompt.trim()
+                                if (agentConsent?.granted == true) onCreateTask(content)
+                                else {
+                                    pendingPrompt = content
+                                    showAgentConsent = true
+                                    if (agentConsent == null) viewModel.loadAiConsents()
+                                }
+                            },
+                            enabled = prompt.trim().length >= 2 && state.aiConsentUpdatingCapability == null,
+                            modifier = Modifier.weight(1f),
+                        ) { Text("开始规划") }
                     }
                 }
             }
@@ -127,6 +152,22 @@ fun HomeScreen(
             Shortcut("社区复核", "帮助其他用户确认过期或冲突的无障碍信息。", Icons.Default.Groups, onCommunity)
             Shortcut("我的无障碍偏好", "门宽、台阶、卫生间、语音与大字设置。", Icons.Default.Person, onProfile)
         }
+    }
+    if (showAgentConsent && agentConsent != null) {
+        AiConsentDialog(
+            consent = agentConsent,
+            updating = state.aiConsentUpdatingCapability == "agent",
+            onAgree = { viewModel.setAiConsent("agent", true) },
+            onRevoke = { viewModel.setAiConsent("agent", false) },
+            onDecline = {
+                viewModel.setAiConsent("agent", false) {
+                    showAgentConsent = false
+                    pendingPrompt = null
+                    onMap()
+                }
+            },
+            onDismiss = { showAgentConsent = false; pendingPrompt = null },
+        )
     }
 }
 

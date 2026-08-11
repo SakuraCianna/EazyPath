@@ -178,6 +178,24 @@ CREATE TABLE "installation_accounts" (
 	CONSTRAINT "chk_installation_accounts_status" CHECK ("installation_accounts"."status" IN ('active', 'suspended', 'deleting', 'deleted'))
 );
 --> statement-breakpoint
+CREATE TABLE "ai_processing_consents" (
+	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"installation_id" uuid NOT NULL,
+	"capability" varchar(16) NOT NULL,
+	"policy_version" varchar(32) NOT NULL,
+	"processor" varchar(64) DEFAULT 'aliyun_model_studio' NOT NULL,
+	"region" varchar(32) DEFAULT 'cn-beijing' NOT NULL,
+	"notice_verified_at" timestamp with time zone NOT NULL,
+	"granted_at" timestamp with time zone,
+	"revoked_at" timestamp with time zone,
+	"version" integer DEFAULT 1 NOT NULL,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
+	CONSTRAINT "chk_ai_processing_consents_capability" CHECK ("ai_processing_consents"."capability" IN ('agent', 'vision', 'asr', 'tts')),
+	CONSTRAINT "chk_ai_processing_consents_decision" CHECK ("ai_processing_consents"."granted_at" IS NOT NULL OR "ai_processing_consents"."revoked_at" IS NOT NULL),
+	CONSTRAINT "chk_ai_processing_consents_version" CHECK ("ai_processing_consents"."version" > 0)
+);
+--> statement-breakpoint
 CREATE TABLE "installation_challenges" (
 	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
 	"installation_guid" uuid NOT NULL,
@@ -368,6 +386,7 @@ CREATE TABLE "verification_records_v2" (
 );
 --> statement-breakpoint
 ALTER TABLE "admin_sessions" ADD CONSTRAINT "admin_sessions_admin_user_id_admin_users_id_fk" FOREIGN KEY ("admin_user_id") REFERENCES "public"."admin_users"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "ai_processing_consents" ADD CONSTRAINT "ai_processing_consents_installation_id_installation_accounts_id_fk" FOREIGN KEY ("installation_id") REFERENCES "public"."installation_accounts"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "admin_users" ADD CONSTRAINT "admin_users_role_id_admin_roles_id_fk" FOREIGN KEY ("role_id") REFERENCES "public"."admin_roles"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "agent_subtasks" ADD CONSTRAINT "agent_subtasks_task_id_agent_tasks_id_fk" FOREIGN KEY ("task_id") REFERENCES "public"."agent_tasks"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "agent_tasks" ADD CONSTRAINT "agent_tasks_installation_id_installation_accounts_id_fk" FOREIGN KEY ("installation_id") REFERENCES "public"."installation_accounts"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
@@ -437,6 +456,7 @@ CREATE INDEX "idx_refresh_sessions_installation" ON "refresh_sessions" USING btr
 CREATE INDEX "idx_service_cards_v2_task" ON "service_cards_v2" USING btree ("task_id","created_at");--> statement-breakpoint
 CREATE INDEX "idx_task_events_task_cursor" ON "task_events" USING btree ("task_id","id");--> statement-breakpoint
 CREATE UNIQUE INDEX "uq_user_profiles_v2_installation" ON "user_profiles_v2" USING btree ("installation_id");--> statement-breakpoint
+CREATE UNIQUE INDEX "uq_ai_processing_consents_installation_capability" ON "ai_processing_consents" USING btree ("installation_id","capability");--> statement-breakpoint
 CREATE INDEX "idx_verification_records_v2_owner" ON "verification_records_v2" USING btree ("installation_id","created_at");
 --> statement-breakpoint
 INSERT INTO "feature_definitions" ("feature_key", "display_name", "value_type", "unit", "target_types") VALUES

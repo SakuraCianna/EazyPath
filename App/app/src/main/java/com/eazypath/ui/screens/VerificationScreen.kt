@@ -33,6 +33,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -43,6 +44,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.eazypath.ui.viewmodels.MainViewModel
+import com.eazypath.ui.components.AiConsentDialog
 import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -53,7 +55,19 @@ fun VerificationScreen(viewModel: MainViewModel, onBack: () -> Unit) {
     var selectedUri by remember { mutableStateOf<Uri?>(null) }
     var redactionConfirmed by remember { mutableStateOf(false) }
     var scene by remember { mutableStateOf("general_accessibility") }
+    var showVisionConsent by remember { mutableStateOf(false) }
+    var showManualChecklist by remember { mutableStateOf(false) }
+    var pendingVerification by remember { mutableStateOf<Pair<Uri, String>?>(null) }
     var tts by remember { mutableStateOf<TextToSpeech?>(null) }
+    val visionConsent = state.aiConsents.firstOrNull { it.capability == "vision" }
+    LaunchedEffect(visionConsent?.granted, pendingVerification) {
+        val pending = pendingVerification
+        if (visionConsent?.granted == true && pending != null) {
+            pendingVerification = null
+            showVisionConsent = false
+            viewModel.submitVerification(pending.first, pending.second)
+        }
+    }
     DisposableEffect(Unit) { tts = TextToSpeech(context) { if (it == TextToSpeech.SUCCESS) tts?.language = Locale.SIMPLIFIED_CHINESE }; onDispose { tts?.shutdown() } }
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { selectedUri = it; redactionConfirmed = false }
     val scenes = listOf("general_accessibility" to "通用无障碍", "entrance" to "入口", "hotel_bathroom" to "酒店浴室", "accessible_restroom" to "无障碍卫生间", "sidewalk_ramp" to "人行道缘石坡道")
@@ -76,8 +90,33 @@ fun VerificationScreen(viewModel: MainViewModel, onBack: () -> Unit) {
                     }
                 }
                 Row { Checkbox(redactionConfirmed, { redactionConfirmed = it }); Text("我已检查预览并确认没有清晰人脸、车牌或身份信息", Modifier.padding(top = 12.dp)) }
-                Button(onClick = { selectedUri?.let { viewModel.submitVerification(it, scene) } }, enabled = selectedUri != null && redactionConfirmed && !state.verificationLoading, modifier = Modifier.fillMaxWidth()) { Text("开始验真") }
+                Button(
+                    onClick = {
+                        selectedUri?.let { uri ->
+                            if (visionConsent?.granted == true) viewModel.submitVerification(uri, scene)
+                            else {
+                                pendingVerification = uri to scene
+                                showVisionConsent = true
+                                if (visionConsent == null) viewModel.loadAiConsents()
+                            }
+                        }
+                    },
+                    enabled = selectedUri != null && redactionConfirmed && !state.verificationLoading && state.aiConsentUpdatingCapability == null,
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("开始验真") }
             } }
+            if (showManualChecklist) {
+                Card(shape = RoundedCornerShape(18.dp)) {
+                    Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("人工无障碍检查清单", fontWeight = FontWeight.Black)
+                        Text("• 入口是否全程无台阶，或有稳定坡道")
+                        Text("• 门洞净宽是否满足轮椅尺寸")
+                        Text("• 通道、转弯和电梯空间是否足够")
+                        Text("• 卫生间是否有扶手、回转空间和可达洗手台")
+                        Text("• 未确认项目请保持“未知”，不要仅凭照片推断")
+                    }
+                }
+            }
             if (state.verificationLoading) Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) { CircularProgressIndicator(); Text("正在验真并等待原图删除…") }
             state.verificationNotice?.let { Text(it, color = MaterialTheme.colorScheme.primary) }
             state.verificationError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
@@ -90,5 +129,21 @@ fun VerificationScreen(viewModel: MainViewModel, onBack: () -> Unit) {
             } }
             }
         }
+    }
+    if (showVisionConsent && visionConsent != null) {
+        AiConsentDialog(
+            consent = visionConsent,
+            updating = state.aiConsentUpdatingCapability == "vision",
+            onAgree = { viewModel.setAiConsent("vision", true) },
+            onRevoke = { viewModel.setAiConsent("vision", false) },
+            onDecline = {
+                viewModel.setAiConsent("vision", false) {
+                    showVisionConsent = false
+                    pendingVerification = null
+                    showManualChecklist = true
+                }
+            },
+            onDismiss = { showVisionConsent = false; pendingVerification = null },
+        )
     }
 }

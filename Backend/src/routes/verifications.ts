@@ -6,6 +6,7 @@ import { db, verificationRecords } from '../db/index.js';
 import { fail, ok } from '../lib/api-response.js';
 import { requireUser } from '../middleware/auth.js';
 import { enqueueVisionVerification } from '../queue/task-queue.js';
+import { hasActiveAiConsent } from '../services/ai-consent.js';
 import { removeTemporaryVerificationImage, saveTemporaryVerificationImage } from '../services/media-storage.js';
 import { lockCanonicalPlace, resolveActivePlace } from '../services/place-resolution.js';
 import type { AppBindings } from '../types.js';
@@ -14,6 +15,12 @@ export const verificationsRouter = new Hono<AppBindings>();
 verificationsRouter.use('*', requireUser);
 
 verificationsRouter.post('/images', async (c) => {
+  if (!await hasActiveAiConsent(c.get('installationId'), 'vision')) {
+    return fail(c, 403, 'AI_CONSENT_REQUIRED', '请先阅读并同意图片辅助判断说明，或使用人工检查清单', {
+      retryable: false,
+      details: { capability: 'vision' },
+    });
+  }
   const body = await c.req.parseBody().catch(() => null);
   const image = body?.image;
   const scene = typeof body?.scene === 'string' ? body.scene : 'general_accessibility';

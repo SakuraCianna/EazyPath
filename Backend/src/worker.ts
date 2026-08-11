@@ -4,7 +4,8 @@ import { readFile, rm } from 'node:fs/promises';
 import { Worker, type Job } from 'bullmq';
 import { and, eq, or } from 'drizzle-orm';
 import { getEnv, parseKeyring } from './config/env.js';
-import { canRecoverRunningAgentTask } from './domain/agent-task-recovery.js';
+import { agentTaskFailureEventType, canRecoverRunningAgentTask } from './domain/agent-task-recovery.js';
+import { AiConsentRequiredError } from './domain/ai-consent.js';
 import {
   agentSubtasks,
   agentTasks,
@@ -21,6 +22,7 @@ import { AgentPlanningError, parseTravelIntent, type ParsedIntent } from './serv
 import { resolvePublicActions } from './services/deeplink.js';
 import { verifyAccessibilityImage, VisionVerificationError } from './services/qwen-vl.js';
 import { cleanupExpiredMedia, expireEvidenceAndCreateReviews } from './services/maintenance.js';
+import { hasActiveAiConsent } from './services/ai-consent.js';
 
 const env = getEnv();
 
@@ -69,6 +71,7 @@ async function processAgentTask(taskId: string, job: Job<TaskJobData>): Promise<
   await job.updateProgress(5);
 
   try {
+    if (!await hasActiveAiConsent(task.installationId, 'agent')) throw new AiConsentRequiredError('agent');
     const intent = await parseTravelIntent(task.originalContent, task.profileSnapshot, task.clientTimezone);
     if (await isTaskCancelled(taskId)) return;
     const intentRecorded = await db.transaction(async (tx) => {
@@ -140,9 +143,10 @@ async function processAgentTask(taskId: string, job: Job<TaskJobData>): Promise<
     await job.updateProgress(100);
   } catch (error) {
     const known = error instanceof AgentPlanningError;
-    const failureCode = known ? error.code : 'TASK_PROCESSING_FAILED';
-    const message = known ? error.message : '任务处理失败，请稍后重试';
-    const retryable = known ? error.retryable : true;
+    const consentRequired = error instanceof AiConsentRequiredError;
+    const failureCode = consentRequired ? 'AI_CONSENT_REQUIRED' : known ? error.code : 'TASK_PROCESSING_FAILED';
+    const message = consentRequired ? '智能文本规划同意已撤回，任务内容未发送给模型' : known ? error.message : '任务处理失败，请稍后重试';
+    const retryable = consentRequired ? false : known ? error.retryable : true;
     const finalAttempt = job.attemptsMade + 1 >= (job.opts.attempts ?? 1);
     const nextStatus = retryable && !finalAttempt ? 'queued' : 'failed';
     await db.transaction(async (tx) => {
@@ -154,7 +158,7 @@ async function processAgentTask(taskId: string, job: Job<TaskJobData>): Promise<
       if (updated) {
         await tx.insert(taskEvents).values({
           taskId,
-          eventType: finalAttempt ? 'task.failed' : 'task.retrying',
+          eventType: agentTaskFailureEventType(nextStatus),
           eventData: { code: failureCode, message, retryable, attempt: job.attemptsMade + 1 },
         });
       }
@@ -292,11 +296,26 @@ function addPlaceCards(
 async function processVisionVerification(verificationId: string, temporaryFilePath: string, job: Job<TaskJobData>): Promise<void> {
   const [record] = await db.select().from(verificationRecords).where(eq(verificationRecords.id, verificationId)).limit(1);
   if (!record || record.status === 'completed') return;
+  if (!record.installationId || !await hasActiveAiConsent(record.installationId, 'vision')) {
+    await db.update(verificationRecords).set({
+      status: 'failed',
+      failureCode: 'AI_CONSENT_REQUIRED',
+      updatedAt: new Date(),
+    }).where(eq(verificationRecords.id, verificationId));
+    await rm(temporaryFilePath, { force: true });
+    await db.update(verificationRecords).set({
+      temporaryMediaDeletedAt: new Date(),
+      originalMediaStored: false,
+      updatedAt: new Date(),
+    }).where(eq(verificationRecords.id, verificationId));
+    return;
+  }
   await db.update(verificationRecords).set({ status: 'running', updatedAt: new Date() }).where(eq(verificationRecords.id, verificationId));
   let completed = false;
   try {
     const file = await readFile(temporaryFilePath);
     const mimeType = detectImageMime(file);
+    if (!await hasActiveAiConsent(record.installationId, 'vision')) throw new AiConsentRequiredError('vision');
     const result = await verifyAccessibilityImage(`data:${mimeType};base64,${file.toString('base64')}`, record.scene);
     const keyring = parseKeyring(env.MEDIA_FINGERPRINT_KEYRING);
     const fingerprintKey = keyring.get(env.MEDIA_FINGERPRINT_KEY_CURRENT_VERSION);
@@ -313,8 +332,14 @@ async function processVisionVerification(verificationId: string, temporaryFilePa
     }).where(eq(verificationRecords.id, verificationId));
     completed = true;
   } catch (error) {
-    const code = error instanceof VisionVerificationError ? error.code : 'VISION_PROCESSING_FAILED';
+    const code = error instanceof AiConsentRequiredError
+      ? 'AI_CONSENT_REQUIRED'
+      : error instanceof VisionVerificationError ? error.code : 'VISION_PROCESSING_FAILED';
     await db.update(verificationRecords).set({ status: 'failed', failureCode: code, updatedAt: new Date() }).where(eq(verificationRecords.id, verificationId));
+    if (error instanceof AiConsentRequiredError) {
+      completed = true;
+      return;
+    }
     throw error;
   } finally {
     const finalAttempt = job.attemptsMade + 1 >= (job.opts.attempts ?? 1);

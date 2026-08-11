@@ -9,6 +9,7 @@ import { fail, ok } from '../lib/api-response.js';
 import { requireUser } from '../middleware/auth.js';
 import { enqueueAgentTask } from '../queue/task-queue.js';
 import { createTask, getLatestTaskEventId, getTaskEventCursor, getTaskEvents, getTaskForInstallation, getTaskIdentityForInstallation, listTasks } from '../repositories/taskRepository.js';
+import { hasActiveAiConsent } from '../services/ai-consent.js';
 import { acquireTaskEventStreamPermit, TaskEventStreamProtectionUnavailableError } from '../services/task-event-stream-guard.js';
 import type { AppBindings } from '../types.js';
 
@@ -27,6 +28,12 @@ tasksRouter.get('/', async (c) => ok(c, await listTasks(c.get('installationId'))
 tasksRouter.post('/', async (c) => {
   const parsed = createTaskSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return fail(c, 422, 'INVALID_INPUT', '出行需求参数无效');
+  if (!await hasActiveAiConsent(c.get('installationId'), 'agent')) {
+    return fail(c, 403, 'AI_CONSENT_REQUIRED', '请先阅读并同意智能文本规划说明，或改用手动搜索', {
+      retryable: false,
+      details: { capability: 'agent' },
+    });
+  }
   const idempotencyKey = c.req.header('idempotency-key');
   const result = await createTask({
     installationId: c.get('installationId'),
@@ -179,6 +186,12 @@ tasksRouter.post('/:taskId/input', async (c) => {
   if (!body.success) return fail(c, 422, 'INVALID_INPUT', '补充信息无效');
   const task = await getTaskForInstallation(c.req.param('taskId'), c.get('installationId'));
   if (!task) return fail(c, 404, 'TASK_NOT_FOUND', '任务不存在');
+  if (!await hasActiveAiConsent(c.get('installationId'), 'agent')) {
+    return fail(c, 403, 'AI_CONSENT_REQUIRED', '智能文本规划同意已撤回，补充内容不会发送给模型', {
+      retryable: false,
+      details: { capability: 'agent' },
+    });
+  }
   if (!['needs_input', 'failed'].includes(task.status)) return fail(c, 409, 'TASK_STATE_CONFLICT', '当前任务状态不接受补充信息');
   const queued = await db.transaction(async (tx) => {
     const [updated] = await tx.update(agentTasks).set({ originalContent: `${task.originalContent}\n补充信息: ${body.data.content}`, status: 'queued', runClaimToken: null, updatedAt: new Date() }).where(and(eq(agentTasks.id, task.id), eq(agentTasks.status, task.status))).returning();
@@ -199,6 +212,12 @@ tasksRouter.post('/:taskId/input', async (c) => {
 tasksRouter.post('/:taskId/retry', async (c) => {
   const task = await getTaskForInstallation(c.req.param('taskId'), c.get('installationId'));
   if (!task) return fail(c, 404, 'TASK_NOT_FOUND', '任务不存在');
+  if (!await hasActiveAiConsent(c.get('installationId'), 'agent')) {
+    return fail(c, 403, 'AI_CONSENT_REQUIRED', '智能文本规划同意已撤回，任务不会重新发送给模型', {
+      retryable: false,
+      details: { capability: 'agent' },
+    });
+  }
   if (task.status !== 'failed') return fail(c, 409, 'TASK_STATE_CONFLICT', '只有失败任务可以重试');
   const queued = await db.transaction(async (tx) => {
     const [updated] = await tx.update(agentTasks).set({ status: 'queued', runClaimToken: null, failureCode: null, failureMessage: null, updatedAt: new Date() }).where(and(eq(agentTasks.id, task.id), eq(agentTasks.status, 'failed'))).returning();

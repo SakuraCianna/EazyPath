@@ -15,6 +15,8 @@ import com.eazypath.data.media.EvidenceImageRedactor
 import com.eazypath.data.media.PreparedEvidence
 import com.eazypath.data.media.evidencePartRanges
 import com.eazypath.data.network.ApiEnvelope
+import com.eazypath.data.network.AiConsentItem
+import com.eazypath.data.network.AiConsentUpdateRequest
 import com.eazypath.data.network.ChallengeRequest
 import com.eazypath.data.network.CreateTaskRequest
 import com.eazypath.data.network.EazyPathApiService
@@ -48,6 +50,7 @@ import com.eazypath.data.security.InstallationIdentity
 import com.eazypath.data.security.SecureSessionStore
 import com.eazypath.data.security.StoredSession
 import com.google.gson.JsonElement
+import com.google.gson.Gson
 import java.io.IOException
 import java.security.MessageDigest
 import java.util.UUID
@@ -108,12 +111,33 @@ class EazyPathRepository(private val context: Context) {
         return api.updateProfile(UpdateProfileRequest(mobility, interaction)).requireData()
     }
 
+    suspend fun getAiConsents(): List<AiConsentItem> {
+        ensureSession()
+        return api.getAiConsents().requireData().consents
+    }
+
+    suspend fun updateAiConsent(capability: String, granted: Boolean, current: AiConsentItem): AiConsentItem {
+        ensureSession()
+        return apiCall {
+            api.updateAiConsent(
+                capability,
+                AiConsentUpdateRequest(
+                    granted = granted,
+                    policyVersion = current.policyVersion,
+                    expectedVersion = current.version,
+                ),
+            )
+        }
+    }
+
     suspend fun createTask(content: String, profileVersion: Int): String {
         ensureSession()
-        return api.createTask(
-            idempotencyKey = UUID.randomUUID().toString(),
-            request = CreateTaskRequest(content = content, profileVersion = profileVersion),
-        ).requireData().taskId
+        return apiCall {
+            api.createTask(
+                idempotencyKey = UUID.randomUUID().toString(),
+                request = CreateTaskRequest(content = content, profileVersion = profileVersion),
+            )
+        }.taskId
     }
 
     suspend fun getTask(taskId: String): TaskDetails {
@@ -217,7 +241,7 @@ class EazyPathRepository(private val context: Context) {
         val bytes = resolver.openInputStream(uri)?.use { it.readBytes() } ?: error("无法读取所选图片")
         require(bytes.size <= 10 * 1024 * 1024) { "图片不能超过 10MB" }
         val image = MultipartBody.Part.createFormData("image", "verification-image", bytes.toRequestBody(mimeType.toMediaType()))
-        val result = api.createVerification(image, scene.toRequestBody("text/plain".toMediaType())).requireData()
+        val result = apiCall { api.createVerification(image, scene.toRequestBody("text/plain".toMediaType())) }
         return result.verificationId to result.privacyNotice
     }
 
@@ -391,6 +415,22 @@ internal fun evidenceUploadIdempotencyKey(uploadDraftId: String, wholeHash: Stri
     "android-evidence-$uploadDraftId-$wholeHash"
 
 class ApiException(val code: String, message: String) : IllegalStateException(message)
+
+private data class ApiFailureEnvelope(val code: String?, val message: String?)
+
+internal fun parseApiFailure(statusCode: Int, body: String?): ApiException {
+    val parsed = body?.let { runCatching { Gson().fromJson(it, ApiFailureEnvelope::class.java) }.getOrNull() }
+    return ApiException(
+        code = parsed?.code?.takeIf { it.isNotBlank() } ?: "HTTP_$statusCode",
+        message = parsed?.message?.takeIf { it.isNotBlank() } ?: "服务请求失败（$statusCode）",
+    )
+}
+
+private suspend fun <T> apiCall(call: suspend () -> ApiEnvelope<T>): T = try {
+    call().requireData()
+} catch (error: HttpException) {
+    throw parseApiFailure(error.code(), error.response()?.errorBody()?.string())
+}
 
 internal fun isRetryableTaskSnapshotError(error: Throwable): Boolean = when (error) {
     is IOException -> true

@@ -120,6 +120,31 @@ export const userProfiles = pgTable(
   (table) => [uniqueIndex('uq_user_profiles_v2_installation').on(table.installationId)],
 );
 
+export const aiProcessingConsents = pgTable(
+  'ai_processing_consents',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    installationId: uuid('installation_id')
+      .notNull()
+      .references(() => installationAccounts.id, { onDelete: 'cascade' }),
+    capability: varchar('capability', { length: 16 }).notNull(),
+    policyVersion: varchar('policy_version', { length: 32 }).notNull(),
+    processor: varchar('processor', { length: 64 }).default('aliyun_model_studio').notNull(),
+    region: varchar('region', { length: 32 }).default('cn-beijing').notNull(),
+    noticeVerifiedAt: timestamp('notice_verified_at', { withTimezone: true }).notNull(),
+    grantedAt: timestamp('granted_at', { withTimezone: true }),
+    revokedAt: timestamp('revoked_at', { withTimezone: true }),
+    version: integer('version').default(1).notNull(),
+    ...timestamps,
+  },
+  (table) => [
+    uniqueIndex('uq_ai_processing_consents_installation_capability').on(table.installationId, table.capability),
+    check('chk_ai_processing_consents_capability', sql`${table.capability} IN ('agent', 'vision', 'asr', 'tts')`),
+    check('chk_ai_processing_consents_decision', sql`${table.grantedAt} IS NOT NULL OR ${table.revokedAt} IS NOT NULL`),
+    check('chk_ai_processing_consents_version', sql`${table.version} > 0`),
+  ],
+);
+
 export interface TaskIntent {
   title: string;
   origin?: string | undefined;

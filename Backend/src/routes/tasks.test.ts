@@ -52,6 +52,7 @@ const eventStreamGuard = vi.hoisted(() => ({
   acquireTaskEventStreamPermit: vi.fn(),
   ProtectionUnavailableError: class extends Error {},
 }));
+const aiConsent = vi.hoisted(() => ({ hasActiveAiConsent: vi.fn() }));
 
 vi.mock('drizzle-orm', () => ({ and: vi.fn(), eq: vi.fn() }));
 vi.mock('hono/streaming', () => ({ streamSSE: streaming.streamSSE }));
@@ -72,6 +73,7 @@ vi.mock('../services/task-event-stream-guard.js', () => ({
   acquireTaskEventStreamPermit: eventStreamGuard.acquireTaskEventStreamPermit,
   TaskEventStreamProtectionUnavailableError: eventStreamGuard.ProtectionUnavailableError,
 }));
+vi.mock('../services/ai-consent.js', () => ({ hasActiveAiConsent: aiConsent.hasActiveAiConsent }));
 
 import { tasksRouter } from './tasks.js';
 import type { AppBindings } from '../types.js';
@@ -89,8 +91,23 @@ describe('任务 SSE 输入边界', () => {
     vi.setSystemTime(new Date('2026-08-11T01:00:00.000Z'));
     streaming.stream.aborted = true;
     eventStreamGuard.acquireTaskEventStreamPermit.mockResolvedValue(eventStreamGuard.permit);
+    aiConsent.hasActiveAiConsent.mockResolvedValue(true);
   });
   afterEach(() => vi.useRealTimers());
+
+  it('未同意智能文本规划时不创建或入队任务', async () => {
+    aiConsent.hasActiveAiConsent.mockResolvedValue(false);
+
+    const response = await testApp().request('/tasks', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ input_type: 'text', content: '从赣州去南昌', profile_version: 1 }),
+    });
+
+    expect(response.status).toBe(403);
+    expect((await response.json()).code).toBe('AI_CONSENT_REQUIRED');
+    expect(repository.createTask).not.toHaveBeenCalled();
+  });
 
   it('在查询数据库前拒绝非法任务 ID', async () => {
     const response = await testApp().request('/tasks/not-a-uuid/events');

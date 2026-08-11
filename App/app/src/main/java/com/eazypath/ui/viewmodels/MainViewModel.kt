@@ -12,6 +12,7 @@ import com.eazypath.data.ApiException
 import com.eazypath.data.media.EvidenceImageAnalysis
 import com.eazypath.data.media.PreparedEvidence
 import com.eazypath.data.network.FeatureDefinition
+import com.eazypath.data.network.AiConsentItem
 import com.eazypath.data.network.InteractionProfile
 import com.eazypath.data.network.LocationProofData
 import com.eazypath.data.network.MobilityProfile
@@ -45,6 +46,10 @@ data class MainUiState(
     val sessionError: String? = null,
     val profile: ProfileData? = null,
     val profileSaving: Boolean = false,
+    val aiConsents: List<AiConsentItem> = emptyList(),
+    val aiConsentsLoading: Boolean = false,
+    val aiConsentUpdatingCapability: String? = null,
+    val aiConsentError: String? = null,
     val task: TaskDetails? = null,
     val taskLoading: Boolean = false,
     val taskError: String? = null,
@@ -117,6 +122,36 @@ class MainViewModel(private val repository: EazyPathRepository) : ViewModel() {
         }
     }
 
+    fun loadAiConsents() {
+        if (_state.value.aiConsentsLoading) return
+        viewModelScope.launch {
+            _state.value = _state.value.copy(aiConsentsLoading = true, aiConsentError = null)
+            runCatching { repository.getAiConsents() }
+                .onSuccess { _state.value = _state.value.copy(aiConsents = it, aiConsentsLoading = false) }
+                .onFailure { _state.value = _state.value.copy(aiConsentsLoading = false, aiConsentError = it.userMessage()) }
+        }
+    }
+
+    fun setAiConsent(capability: String, granted: Boolean, onSuccess: () -> Unit = {}) {
+        val current = _state.value.aiConsents.firstOrNull { it.capability == capability } ?: return
+        if (_state.value.aiConsentUpdatingCapability != null) return
+        viewModelScope.launch {
+            _state.value = _state.value.copy(aiConsentUpdatingCapability = capability, aiConsentError = null)
+            runCatching { repository.updateAiConsent(capability, granted, current) }
+                .onSuccess { updated ->
+                    _state.value = _state.value.copy(
+                        aiConsents = _state.value.aiConsents.map { if (it.capability == capability) updated else it },
+                        aiConsentUpdatingCapability = null,
+                    )
+                    onSuccess()
+                }
+                .onFailure {
+                    _state.value = _state.value.copy(aiConsentUpdatingCapability = null, aiConsentError = it.userMessage())
+                    loadAiConsents()
+                }
+        }
+    }
+
     fun createTravelTask(prompt: String) {
         if (activePrompt == prompt && (_state.value.taskLoading || _state.value.task != null)) return
         activePrompt = prompt
@@ -133,6 +168,7 @@ class MainViewModel(private val repository: EazyPathRepository) : ViewModel() {
                 observeTask(taskId)
             }.onFailure {
                 _state.value = _state.value.copy(taskLoading = false, taskError = it.userMessage())
+                if (it is ApiException && it.code == "AI_CONSENT_REQUIRED") loadAiConsents()
             }
         }
     }
@@ -151,7 +187,10 @@ class MainViewModel(private val repository: EazyPathRepository) : ViewModel() {
                     _state.value = _state.value.copy(verificationNotice = notice)
                     pollVerification(id)
                 }
-                .onFailure { _state.value = _state.value.copy(verificationLoading = false, verificationError = it.userMessage()) }
+                .onFailure {
+                    _state.value = _state.value.copy(verificationLoading = false, verificationError = it.userMessage())
+                    if (it is ApiException && it.code == "AI_CONSENT_REQUIRED") loadAiConsents()
+                }
         }
     }
 
@@ -574,9 +613,14 @@ class MainViewModel(private val repository: EazyPathRepository) : ViewModel() {
             _state.value = _state.value.copy(sessionLoading = true, sessionError = null)
             runCatching {
                 repository.ensureSession()
-                repository.getProfile()
-            }.onSuccess {
-                _state.value = _state.value.copy(sessionReady = true, sessionLoading = false, profile = it)
+                repository.getProfile() to repository.getAiConsents()
+            }.onSuccess { (profile, consents) ->
+                _state.value = _state.value.copy(
+                    sessionReady = true,
+                    sessionLoading = false,
+                    profile = profile,
+                    aiConsents = consents,
+                )
             }.onFailure {
                 _state.value = _state.value.copy(sessionReady = false, sessionLoading = false, sessionError = it.userMessage())
             }
